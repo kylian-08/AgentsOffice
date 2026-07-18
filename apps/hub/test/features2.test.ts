@@ -1,9 +1,10 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { OfficeBus } from "../src/domain/bus.js";
 import { OfficeService } from "../src/domain/office.js";
+import { buildCodexExecArgs, createManagedDispatcher } from "../src/domain/runners.js";
 import { OfficeStore } from "../src/domain/store.js";
 import { handleClaudeHook } from "../src/integrations/ingest.js";
 import {
@@ -193,6 +194,72 @@ describe("Claude 配置合并", () => {
       type: "http",
       url: "http://127.0.0.1:4517/mcp",
     });
+  });
+});
+
+describe("codex exec 参数拼装", () => {
+  it("首轮：--sandbox 与 -C 直传", () => {
+    const args = buildCodexExecArgs({ sandbox: "workspace-write" }, "D:\\proj");
+    expect(args).toEqual([
+      "exec",
+      "--json",
+      "--skip-git-repo-check",
+      "--sandbox",
+      "workspace-write",
+      "-C",
+      "D:\\proj",
+      "-",
+    ]);
+  });
+
+  it("续聊：resume 不接受 --sandbox/-C，改用 -c sandbox_mode", () => {
+    const args = buildCodexExecArgs({ threadId: "t-1", sandbox: "read-only" }, "D:\\proj");
+    expect(args).toEqual([
+      "exec",
+      "resume",
+      "t-1",
+      "--json",
+      "--skip-git-repo-check",
+      "-c",
+      "sandbox_mode=read-only",
+      "-",
+    ]);
+    expect(args).not.toContain("--sandbox");
+    expect(args).not.toContain("-C");
+  });
+});
+
+describe("托管执行失败路径", () => {
+  it("失败也标记收件箱已读，重复错误折叠", async () => {
+    const office = makeOffice();
+    const dispatch = createManagedDispatcher(
+      office,
+      { port: 0, dataDir: "", cursorModel: "auto", codexTurnTimeoutMs: 1000 } as any,
+      {
+        "codex-managed": async () => {
+          throw new Error("error: unexpected argument '--sandbox' found\n  tip: ...");
+        },
+      },
+    );
+    office.setManagedDispatcher(dispatch);
+    const agent = office.store.registerAgent({ name: "codex-x", kind: "codex-managed" });
+
+    office.sendMessage({ fromName: "老板", text: "@codex-x 干活" });
+    await vi.waitFor(() => expect(office.store.pendingCount(agent.id)).toBe(0));
+
+    office.sendMessage({ fromName: "老板", text: "@codex-x 干活" });
+    await vi.waitFor(() => {
+      const errors = office.store
+        .listEvents()
+        .filter((e) => e.type === "run-error");
+      expect(errors).toHaveLength(2);
+      // 第二条相同错误被折叠，不再重复长文本
+      expect(errors.some((e) => e.text?.includes("相同的错误"))).toBe(true);
+    });
+    expect(office.store.pendingCount(agent.id)).toBe(0);
+    // 错误文本被压成单行
+    const first = office.store.listEvents().find((e) => e.type === "run-error");
+    expect(first?.text).not.toContain("\n");
   });
 });
 

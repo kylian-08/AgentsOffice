@@ -28,6 +28,27 @@ export class RunQueue {
   }
 }
 
+/**
+ * 拼装 codex exec 参数。
+ * 注意：`codex exec resume` 子命令不接受 --sandbox / -C（会退出码 2），
+ * 沙箱改用 -c sandbox_mode=... 传入；工作目录沿用会话记录。
+ */
+export function buildCodexExecArgs(meta: { threadId?: string; sandbox?: string }, workspace: string | null): string[] {
+  const sandbox = meta.sandbox === "workspace-write" ? "workspace-write" : "read-only";
+  const args = ["exec"];
+  if (meta.threadId) {
+    args.push("resume", meta.threadId);
+    args.push("--json", "--skip-git-repo-check");
+    args.push("-c", `sandbox_mode=${sandbox}`);
+  } else {
+    args.push("--json", "--skip-git-repo-check");
+    args.push("--sandbox", sandbox);
+    if (workspace) args.push("-C", workspace);
+  }
+  args.push("-");
+  return args;
+}
+
 /** 托管 Codex：codex exec --json，提示词经 stdin，线程 ID 存 meta 以便续聊 */
 export async function runCodexTurn(
   agent: AgentCard,
@@ -35,12 +56,7 @@ export async function runCodexTurn(
   config: OfficeConfig,
 ): Promise<TurnResult> {
   const meta = agent.meta as { threadId?: string; sandbox?: string };
-  const args = ["exec"];
-  if (meta.threadId) args.push("resume", meta.threadId);
-  args.push("--json", "--skip-git-repo-check");
-  args.push("--sandbox", meta.sandbox === "workspace-write" ? "workspace-write" : "read-only");
-  if (agent.workspace) args.push("-C", agent.workspace);
-  args.push("-");
+  const args = buildCodexExecArgs(meta, agent.workspace);
 
   let threadId: string | undefined;
   let lastAgentMessage = "";
@@ -182,6 +198,7 @@ export function createManagedDispatcher(
   >,
 ) {
   const queue = new RunQueue();
+  const lastErrors = new Map<string, string>();
   const resolveRunner = (kind: string): TurnRunner => {
     if (kind === "codex-managed") {
       return runners?.["codex-managed"] ?? ((a, p) => runCodexTurn(a, p, config));
@@ -230,14 +247,21 @@ export function createManagedDispatcher(
         });
         store.setAgentStatus(agent.id, "online");
         office.setActivity(agent.id, null);
+        lastErrors.delete(agent.id);
         office.event({ type: "run", agentId: agent.id, text: "执行完成，简报已发布" });
       } catch (error) {
+        // 失败也要清收件箱，否则未读数只增不减
+        store.markDeliveriesRead(agent.id);
         store.setAgentStatus(agent.id, "online");
         office.setActivity(agent.id, null);
+        const raw = error instanceof Error ? error.message : String(error);
+        const brief = truncate(raw.replaceAll(/\s+/g, " ").trim(), 160);
+        const repeated = lastErrors.get(agent.id) === brief;
+        lastErrors.set(agent.id, brief);
         office.event({
           type: "run-error",
           agentId: agent.id,
-          text: `执行失败：${truncate(error instanceof Error ? error.message : String(error), 200)}`,
+          text: repeated ? "执行失败（与上次相同的错误，详情见前文）" : `执行失败：${brief}`,
         });
       }
     });

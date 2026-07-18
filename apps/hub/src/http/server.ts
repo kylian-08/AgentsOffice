@@ -123,6 +123,9 @@ export async function createServer(
       model?: string;
     };
     if (!body.name?.trim()) return reply.code(400).send({ error: "name 不能为空" });
+    if (/^\d+$/.test(body.name.trim())) {
+      return reply.code(400).send({ error: "工号不能是纯数字（容易误 @），请带上业务前缀，如 codex-画布" });
+    }
     const kindMap = {
       codex: "codex-managed",
       cursor: "cursor-managed",
