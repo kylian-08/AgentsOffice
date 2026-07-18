@@ -12,6 +12,7 @@ import type {
   KbDoc,
   LogEntry,
   OfficeBrief,
+  OfficeGroup,
   OfficeTask,
 } from "@agent-office/protocol";
 import { api, type Health, type OfficeState, type TerminalPane } from "./api";
@@ -227,10 +228,12 @@ function HistoryModal({ agent, onClose }: { agent: AgentCard; onClose: () => voi
 
 function AgentBadge({
   agent,
+  groups,
   onMention,
   onChanged,
 }: {
   agent: AgentCard;
+  groups: OfficeGroup[];
   onMention: (name: string) => void;
   onChanged: () => void;
 }) {
@@ -238,13 +241,21 @@ function AgentBadge({
   const [name, setName] = useState(agent.name);
   const [model, setModel] = useState(meta(agent).model ?? "");
   const [title, setTitle] = useState(meta(agent).title ?? "");
+  const [groupId, setGroupId] = useState(agent.groupId ?? "");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
 
   const save = async () => {
     try {
-      await api.updateAgent(agent.id, { name: name.trim(), model, title });
+      await api.updateAgent(agent.id, {
+        name: name.trim(),
+        model,
+        title,
+        ...(agent.kind !== "user" && agent.kind !== "supervisor"
+          ? { groupId: groupId || null }
+          : {}),
+      });
       setEditing(false);
       setError("");
       onChanged();
@@ -345,6 +356,11 @@ function AgentBadge({
       )}
 
       {!editing && m.title && <div className="badge-title">职位：{m.title}</div>}
+      {!editing && agent.groupName && (
+        <div className="badge-group" title={`项目组：${agent.groupName}`}>
+          ⌂ {agent.groupName}
+        </div>
+      )}
 
       {editing && (
         <div className="badge-edit">
@@ -361,6 +377,16 @@ function AgentBadge({
               onChange={(e) => setTitle(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && void save()}
             />
+          )}
+          {agent.kind !== "user" && agent.kind !== "supervisor" && groups.length > 0 && (
+            <select value={groupId} onChange={(e) => setGroupId(e.target.value)}>
+              <option value="">不分组（只在大群）</option>
+              {groups.map((g) => (
+                <option key={g.id} value={g.id}>
+                  {g.name}
+                </option>
+              ))}
+            </select>
           )}
           {error && <div className="form-error">{error}</div>}
           <div className="form-actions">
@@ -408,6 +434,7 @@ function AgentBadge({
               setName(agent.name);
               setModel(m.model ?? "");
               setTitle(m.title ?? "");
+              setGroupId(agent.groupId ?? "");
             }}
           >
             ✎
@@ -620,10 +647,14 @@ function OnboardModal({ onClose }: { onClose: () => void }) {
 function Composer({
   agents,
   prefill,
+  channel,
+  channelName,
   onSent,
 }: {
   agents: AgentCard[];
   prefill: string;
+  channel: string;
+  channelName: string;
   onSent: () => void;
 }) {
   const [text, setText] = useState("");
@@ -668,7 +699,7 @@ function Composer({
   const send = async () => {
     if (!text.trim()) return;
     try {
-      const result = await api.sendMessage(text.trim());
+      const result = await api.sendMessage(text.trim(), channel);
       const managed = result.routed.filter((r) => r.mode === "managed").map((r) => r.name);
       const inbox = result.routed.filter((r) => r.mode === "inbox").map((r) => r.name);
       const supervisor = result.routed.some((r) => r.mode === "supervisor");
@@ -711,7 +742,11 @@ function Composer({
           ref={inputRef}
           value={text}
           rows={2}
-          placeholder="给办公室发消息：@工号 呼叫成员，@主管 自动分派，@all 全员……"
+          placeholder={
+            channel === "hall"
+              ? "给大群发消息：@工号 呼叫成员，@主管 自动分派，@all 全员……"
+              : `发到「${channelName}」频道：@工号 呼叫成员，@all 只喊本组人……`
+          }
           onChange={(e) => {
             setText(e.target.value);
             updateSuggestions(e.target.value);
@@ -1189,7 +1224,108 @@ function TerminalBoard({ refreshKey }: { refreshKey: number }) {
 
 // ---------- 动态流 ----------
 
-function Feed({ state }: { state: OfficeState }) {
+/** 频道栏：大群 + 各项目组频道，支持建组/解散 */
+function ChannelBar({
+  groups,
+  channel,
+  onSelect,
+  onChanged,
+}: {
+  groups: OfficeGroup[];
+  channel: string;
+  onSelect: (channel: string) => void;
+  onChanged: () => void;
+}) {
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState("");
+  const [error, setError] = useState("");
+
+  const create = async () => {
+    if (!name.trim()) return;
+    try {
+      const group = await api.createGroup(name.trim());
+      setName("");
+      setCreating(false);
+      setError("");
+      onChanged();
+      onSelect(group.id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const disband = async (group: OfficeGroup) => {
+    if (!window.confirm(`解散项目组「${group.name}」？成员回到大群，组内历史消息保留。`)) return;
+    try {
+      await api.deleteGroup(group.id);
+      if (channel === group.id) onSelect("hall");
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  return (
+    <div className="channel-bar" role="tablist" aria-label="频道">
+      <button
+        role="tab"
+        aria-selected={channel === "hall"}
+        className={`channel-tab ${channel === "hall" ? "active" : ""}`}
+        onClick={() => onSelect("hall")}
+      >
+        ⌂ 大群
+      </button>
+      {groups.map((g) => (
+        <span key={g.id} className={`channel-tab-wrap ${channel === g.id ? "active" : ""}`}>
+          <button
+            role="tab"
+            aria-selected={channel === g.id}
+            className={`channel-tab ${channel === g.id ? "active" : ""}`}
+            onClick={() => onSelect(g.id)}
+            title={`项目组「${g.name}」（${g.memberCount ?? 0} 人）`}
+          >
+            # {g.name}
+            <em>{g.memberCount ?? 0}</em>
+          </button>
+          <button
+            className="channel-del"
+            title={`解散「${g.name}」`}
+            onClick={() => void disband(g)}
+          >
+            ×
+          </button>
+        </span>
+      ))}
+      {creating ? (
+        <span className="channel-new">
+          <input
+            value={name}
+            autoFocus
+            placeholder="项目组名（如 画布 / 算力平台）"
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void create();
+              if (e.key === "Escape") setCreating(false);
+            }}
+          />
+          <button className="primary-btn sm" onClick={() => void create()}>
+            建组
+          </button>
+          <button className="ghost-btn" onClick={() => setCreating(false)}>
+            取消
+          </button>
+        </span>
+      ) : (
+        <button className="channel-tab channel-add" title="新建项目组" onClick={() => setCreating(true)}>
+          ＋ 建组
+        </button>
+      )}
+      {error && <span className="form-error">{error}</span>}
+    </div>
+  );
+}
+
+function Feed({ state, channel }: { state: OfficeState; channel: string }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const atBottomRef = useRef(true);
   const [hasNew, setHasNew] = useState(false);
@@ -1201,7 +1337,13 @@ function Feed({ state }: { state: OfficeState }) {
 
   const items = useMemo(() => {
     const list: Array<{ key: string; at: number; node: React.ReactNode }> = [];
-    for (const m of state.messages) {
+    // 组频道只看本组成员的事件；大群看全部事件
+    const groupMemberIds =
+      channel === "hall"
+        ? null
+        : new Set(state.agents.filter((a) => a.groupId === channel).map((a) => a.id));
+    const messages = state.messages.filter((m) => (m.channel ?? "hall") === channel);
+    for (const m of messages) {
       const own = m.fromName === bossName;
       const fromAgent = state.agents.find((a) => a.name === m.fromName);
       list.push({
@@ -1234,6 +1376,7 @@ function Feed({ state }: { state: OfficeState }) {
       });
     }
     for (const e of state.events) {
+      if (groupMemberIds && (!e.agentId || !groupMemberIds.has(e.agentId))) continue;
       list.push({
         key: `e-${e.id}`,
         at: e.createdAt,
@@ -1253,7 +1396,7 @@ function Feed({ state }: { state: OfficeState }) {
       });
     }
     return list.sort((a, b) => a.at - b.at).slice(-150);
-  }, [state, bossName]);
+  }, [state, bossName, channel]);
 
   // 智能滚动：贴底时跟随新消息；用户上翻时不打扰，改为「回到最新」提示
   useEffect(() => {
@@ -1265,7 +1408,7 @@ function Feed({ state }: { state: OfficeState }) {
     } else {
       setHasNew(true);
     }
-  }, [items.length]);
+  }, [items.length, channel]);
 
   const onScroll = () => {
     const el = scrollRef.current;
@@ -1640,8 +1783,16 @@ export function App() {
   const [health, setHealth] = useState<Health | null>(null);
   const [mentionPrefill, setMentionPrefill] = useState("");
   const [view, setView] = useState<"office" | "live" | "terminal" | "logs" | "kb">("office");
+  const [channel, setChannel] = useState("hall");
   const [onboardOpen, setOnboardOpen] = useState(false);
   const refreshTimer = useRef<number | null>(null);
+
+  // 当前频道对应的项目组被解散时回到大群
+  useEffect(() => {
+    if (channel !== "hall" && state && !(state.groups ?? []).some((g) => g.id === channel)) {
+      setChannel("hall");
+    }
+  }, [state, channel]);
 
   const refresh = useCallback(() => {
     if (refreshTimer.current) return;
@@ -1804,6 +1955,7 @@ export function App() {
                   <AgentBadge
                     key={agent.id}
                     agent={agent}
+                    groups={state.groups ?? []}
                     onMention={(name) => setMentionPrefill(`@${name}`)}
                     onChanged={refresh}
                   />
@@ -1814,8 +1966,22 @@ export function App() {
           </aside>
 
           <section className="col col-center">
-            <Feed state={state} />
-            <Composer agents={state.agents} prefill={mentionPrefill} onSent={refresh} />
+            <ChannelBar
+              groups={state.groups ?? []}
+              channel={channel}
+              onSelect={setChannel}
+              onChanged={refresh}
+            />
+            <Feed state={state} channel={channel} />
+            <Composer
+              agents={state.agents}
+              prefill={mentionPrefill}
+              channel={channel}
+              channelName={
+                (state.groups ?? []).find((g) => g.id === channel)?.name ?? "大群"
+              }
+              onSent={refresh}
+            />
           </section>
 
           <aside className="col col-right">

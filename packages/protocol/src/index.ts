@@ -29,6 +29,20 @@ export interface AgentCard {
   todayTokens?: number;
   /** 已完成任务数 */
   doneTasks?: number;
+  /** 所属项目组（null 表示只在大群） */
+  groupId?: string | null;
+  groupName?: string | null;
+}
+
+/** 频道标识：大群固定为 "hall"，项目组频道即组 ID */
+export const HALL_CHANNEL = "hall";
+
+/** 项目组：一组员工 + 一个专属频道 */
+export interface OfficeGroup {
+  id: string;
+  name: string;
+  createdAt: number;
+  memberCount?: number;
 }
 
 export interface OfficeMessage {
@@ -39,6 +53,8 @@ export interface OfficeMessage {
   mentions: string[];
   taskId: string | null;
   createdAt: number;
+  /** 所属频道：hall（大群）或项目组 ID */
+  channel: string;
   deliveries: Array<{ toName: string; status: "pending" | "read" }>;
 }
 

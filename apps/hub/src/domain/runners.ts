@@ -27,6 +27,32 @@ export type TurnRunner = (
   io?: TurnIO,
 ) => Promise<TurnResult>;
 
+/** 全局并发闸门：限制同时运行的托管回合数，避免几十个 CLI 子进程挤爆机器 */
+export class Semaphore {
+  private waiters: Array<() => void> = [];
+  private active = 0;
+
+  constructor(private readonly limit: number) {}
+
+  async acquire(): Promise<() => void> {
+    if (this.active >= this.limit) {
+      await new Promise<void>((resolve) => this.waiters.push(resolve));
+    }
+    this.active += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.active -= 1;
+      this.waiters.shift()?.();
+    };
+  }
+
+  get inUse(): number {
+    return this.active;
+  }
+}
+
 /** 每个 Agent 一条串行链，避免同一托管会话并发跑两轮 */
 export class RunQueue {
   private chains = new Map<string, Promise<void>>();
@@ -308,6 +334,7 @@ export function createManagedDispatcher(
   >,
 ) {
   const queue = new RunQueue();
+  const gate = new Semaphore(Math.max(1, config.maxConcurrentRuns ?? 3));
   const lastErrors = new Map<string, string>();
   // 直连输入也会打到 codex-cli / claude-cli（凭 threadId/sessionId 续聊），按前缀路由
   const resolveRunner = (kind: string): TurnRunner => {
@@ -322,10 +349,18 @@ export function createManagedDispatcher(
 
   return (
     agent: AgentCard,
-    message: { fromName: string; text: string; taskId?: string | null; raw?: boolean },
+    message: {
+      fromName: string;
+      text: string;
+      taskId?: string | null;
+      raw?: boolean;
+      channel?: string;
+    },
   ) => {
     void queue.enqueue(agent.id, async () => {
       const { store } = office;
+      // 先过全局并发闸门，再真正开跑
+      const release = await gate.acquire();
       store.setAgentStatus(agent.id, "busy");
       office.setActivity(
         agent.id,
@@ -370,7 +405,7 @@ export function createManagedDispatcher(
         if (result.usage) store.addTokens(agent.id, result.usage);
         if (message.raw) {
           // 直连输入：结果回传到群里给老板看，但不发简报（属于精细调整，不算正式产出）
-          office.postReply(agent.id, `【直连回复】${result.text}`, null);
+          office.postReply(agent.id, `【直连回复】${result.text}`, null, message.channel);
           store.setAgentStatus(agent.id, "online");
           office.setActivity(agent.id, null);
           lastErrors.delete(agent.id);
@@ -383,8 +418,8 @@ export function createManagedDispatcher(
           return;
         }
         store.markDeliveriesRead(agent.id);
-        // 回复以群消息形式进入动态流（不再触发 @ 路由），同时留档简报墙
-        office.postReply(agent.id, result.text, message.taskId ?? null);
+        // 回复以群消息形式进入动态流（不再触发 @ 路由，落回来源频道），同时留档简报墙
+        office.postReply(agent.id, result.text, message.taskId ?? null, message.channel);
         office.publishBrief({
           agentName: agent.name,
           kind: "auto",
@@ -422,6 +457,7 @@ export function createManagedDispatcher(
         });
       } finally {
         office.clearRunKill(agent.id);
+        release();
       }
     });
   };

@@ -8,6 +8,8 @@ export interface OfficeConfig {
   cursorModel: string;
   /** 托管 Codex 运行单轮的超时（毫秒） */
   codexTurnTimeoutMs: number;
+  /** 同时运行的托管回合上限（全局并发闸门），默认 3 */
+  maxConcurrentRuns?: number;
 }
 
 export const OFFICE_HOME = join(homedir(), ".agent-office");
@@ -30,6 +32,7 @@ export function loadConfig(): OfficeConfig {
     dataDir: raw.dataDir ?? OFFICE_HOME,
     cursorModel: raw.cursorModel ?? "composer-2.5",
     codexTurnTimeoutMs: raw.codexTurnTimeoutMs ?? 10 * 60_000,
+    maxConcurrentRuns: Number(process.env.AGENT_OFFICE_MAX_RUNS ?? raw.maxConcurrentRuns ?? 3),
   };
   if (!existsSync(CONFIG_PATH)) {
     writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf8");

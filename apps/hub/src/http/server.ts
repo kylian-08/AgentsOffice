@@ -70,20 +70,40 @@ export async function createServer(
 
   app.get("/api/state", async () => ({
     agents: office.store.listAgents(),
-    messages: office.store.listMessages(80),
+    groups: office.store.listGroups(),
+    messages: office.store.listMessages(200),
     tasks: office.store.listTasks(),
     briefs: office.store.listBriefs(40),
     events: office.store.listEvents(80),
   }));
 
   app.post("/api/messages", async (request, reply) => {
-    const body = (request.body ?? {}) as { text?: string; from?: string };
+    const body = (request.body ?? {}) as { text?: string; from?: string; channel?: string };
     if (!body.text?.trim()) return reply.code(400).send({ error: "text 不能为空" });
     const result = office.sendMessage({
       fromName: body.from?.trim() || office.bossName(),
       text: body.text.trim(),
+      channel: body.channel,
     });
     return result;
+  });
+
+  // ---------- 项目组 ----------
+  app.get("/api/groups", async () => ({ groups: office.store.listGroups() }));
+
+  app.post("/api/groups", async (request, reply) => {
+    const body = (request.body ?? {}) as { name?: string };
+    if (!body.name?.trim()) return reply.code(400).send({ error: "name 不能为空" });
+    const result = office.createGroup(body.name);
+    if (!result.ok) return reply.code(409).send({ error: result.error });
+    return result.group;
+  });
+
+  app.delete("/api/groups/:id", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const result = office.deleteGroup(id);
+    if (!result.ok) return reply.code(404).send({ error: result.error });
+    return { ok: true };
   });
 
   app.post("/api/tasks", async (request, reply) => {
@@ -152,10 +172,19 @@ export async function createServer(
 
   app.patch("/api/agents/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
-    const body = (request.body ?? {}) as { name?: string; model?: string; title?: string };
+    const body = (request.body ?? {}) as {
+      name?: string;
+      model?: string;
+      title?: string;
+      groupId?: string | null;
+    };
     const agent = office.renameAgent(id, body);
     if (!agent) return reply.code(409).send({ error: "改名失败：Agent 不存在或工号已被占用" });
-    return agent;
+    if (body.groupId !== undefined) {
+      const result = office.assignGroup(id, body.groupId);
+      if (!result.ok) return reply.code(400).send({ error: result.error });
+    }
+    return office.store.listAgents().find((a) => a.id === id) ?? agent;
   });
 
   app.delete("/api/agents/:id", async (request, reply) => {

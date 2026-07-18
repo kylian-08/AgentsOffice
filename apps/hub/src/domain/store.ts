@@ -9,6 +9,7 @@ import type {
   KbDoc,
   OfficeBrief,
   OfficeEvent,
+  OfficeGroup,
   OfficeMessage,
   OfficeTask,
   TaskStatus,
@@ -104,6 +105,11 @@ CREATE TABLE IF NOT EXISTS kb_docs(
   updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_kb_category ON kb_docs(category, updated_at DESC);
+CREATE TABLE IF NOT EXISTS groups(
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+  created_at INTEGER NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_deliveries_to ON deliveries(to_agent_id, status);
 CREATE INDEX IF NOT EXISTS idx_briefs_created ON briefs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at DESC);
@@ -119,6 +125,7 @@ interface AgentRow {
   meta: string;
   last_seen_at: number | null;
   created_at: number;
+  group_id?: string | null;
 }
 
 /** 本地时区的 YYYY-MM-DD，作为 token 日结键 */
@@ -136,6 +143,7 @@ function rowToAgent(row: AgentRow): AgentCard {
     meta: JSON.parse(row.meta ?? "{}"),
     lastSeenAt: row.last_seen_at,
     createdAt: row.created_at,
+    groupId: row.group_id ?? null,
   };
 }
 
@@ -150,6 +158,17 @@ export class OfficeStore {
     // 旧库迁移：消息记录发件人名字快照，员工删除后历史仍可读
     try {
       this.db.exec("ALTER TABLE messages ADD COLUMN from_name TEXT");
+    } catch {
+      /* 列已存在 */
+    }
+    // 旧库迁移：项目组（员工归属 + 消息频道）
+    try {
+      this.db.exec("ALTER TABLE agents ADD COLUMN group_id TEXT");
+    } catch {
+      /* 列已存在 */
+    }
+    try {
+      this.db.exec("ALTER TABLE messages ADD COLUMN channel TEXT NOT NULL DEFAULT 'hall'");
     } catch {
       /* 列已存在 */
     }
@@ -240,12 +259,80 @@ export class OfficeStore {
       )
       .all() as unknown as Array<{ agentId: string; cnt: number }>;
     const doneMap = new Map(done.map((d) => [d.agentId, d.cnt]));
+    const groupNames = new Map(this.listGroups().map((g) => [g.id, g.name]));
     for (const agent of agents) {
       agent.pendingCount = map.get(agent.id) ?? 0;
       agent.todayTokens = tokenMap.get(agent.id) ?? 0;
       agent.doneTasks = doneMap.get(agent.id) ?? 0;
+      agent.groupName = agent.groupId ? (groupNames.get(agent.groupId) ?? null) : null;
     }
     return agents;
+  }
+
+  // ---------- 项目组 ----------
+
+  createGroup(name: string): OfficeGroup | null {
+    const trimmed = name.trim();
+    if (!trimmed) return null;
+    if (this.getGroupByName(trimmed)) return null;
+    const id = uuid();
+    this.db
+      .prepare("INSERT INTO groups(id, name, created_at) VALUES (?, ?, ?)")
+      .run(id, trimmed, now());
+    return this.getGroupById(id);
+  }
+
+  getGroupById(id: string): OfficeGroup | null {
+    const row = this.db.prepare("SELECT * FROM groups WHERE id = ?").get(id) as
+      | { id: string; name: string; created_at: number }
+      | undefined;
+    return row ? { id: row.id, name: row.name, createdAt: row.created_at } : null;
+  }
+
+  getGroupByName(name: string): OfficeGroup | null {
+    const row = this.db
+      .prepare("SELECT * FROM groups WHERE name = ? COLLATE NOCASE")
+      .get(name.trim()) as { id: string; name: string; created_at: number } | undefined;
+    return row ? { id: row.id, name: row.name, createdAt: row.created_at } : null;
+  }
+
+  listGroups(): OfficeGroup[] {
+    const rows = this.db
+      .prepare(
+        `SELECT g.id, g.name, g.created_at, COUNT(a.id) AS member_count
+         FROM groups g LEFT JOIN agents a ON a.group_id = g.id
+         GROUP BY g.id ORDER BY g.created_at ASC`,
+      )
+      .all() as unknown as Array<{
+      id: string;
+      name: string;
+      created_at: number;
+      member_count: number;
+    }>;
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      createdAt: r.created_at,
+      memberCount: r.member_count,
+    }));
+  }
+
+  /** 解散项目组：成员回到未分组（大群仍可 @ 到他们），组频道历史消息保留 */
+  deleteGroup(id: string): boolean {
+    if (!this.getGroupById(id)) return false;
+    this.db.prepare("UPDATE agents SET group_id = NULL WHERE group_id = ?").run(id);
+    this.db.prepare("DELETE FROM groups WHERE id = ?").run(id);
+    return true;
+  }
+
+  setAgentGroup(agentId: string, groupId: string | null): boolean {
+    if (groupId && !this.getGroupById(groupId)) return false;
+    this.db.prepare("UPDATE agents SET group_id = ? WHERE id = ?").run(groupId, agentId);
+    return true;
+  }
+
+  groupMembers(groupId: string): AgentCard[] {
+    return this.listAgents().filter((a) => a.groupId === groupId);
   }
 
   /** 累计今日 token 用量（托管执行结束时调用） */
@@ -401,6 +488,7 @@ export class OfficeStore {
     text: string;
     mentionAgentIds: string[];
     taskId?: string | null;
+    channel?: string;
   }): string {
     const id = uuid();
     const fromName = input.fromAgentId
@@ -408,8 +496,8 @@ export class OfficeStore {
       : null;
     this.db
       .prepare(
-        `INSERT INTO messages(id, from_agent_id, from_name, text, mentions, task_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO messages(id, from_agent_id, from_name, text, mentions, task_id, channel, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -418,6 +506,7 @@ export class OfficeStore {
         input.text,
         JSON.stringify(input.mentionAgentIds),
         input.taskId ?? null,
+        input.channel ?? "hall",
         now(),
       );
     const stmt = this.db.prepare(
@@ -430,7 +519,7 @@ export class OfficeStore {
   listMessages(limit = 100): OfficeMessage[] {
     const rows = this.db
       .prepare(
-        `SELECT m.id, m.from_agent_id, m.text, m.mentions, m.task_id, m.created_at,
+        `SELECT m.id, m.from_agent_id, m.text, m.mentions, m.task_id, m.channel, m.created_at,
                 COALESCE(a.name, m.from_name) AS from_name FROM messages m
          LEFT JOIN agents a ON a.id = m.from_agent_id
          ORDER BY m.created_at DESC LIMIT ?`,
@@ -442,6 +531,7 @@ export class OfficeStore {
       text: string;
       mentions: string;
       task_id: string | null;
+      channel: string;
       created_at: number;
     }>;
     const deliveryStmt = this.db.prepare(
@@ -455,6 +545,7 @@ export class OfficeStore {
       text: row.text,
       mentions: JSON.parse(row.mentions) as string[],
       taskId: row.task_id,
+      channel: row.channel ?? "hall",
       createdAt: row.created_at,
       deliveries: (deliveryStmt.all(row.id) as unknown as Array<{
         status: "pending" | "read";
@@ -468,13 +559,14 @@ export class OfficeStore {
     fromName: string;
     text: string;
     taskId: string | null;
+    channel: string;
     createdAt: number;
   }> {
     return (
       this.db
         .prepare(
           `SELECT m.id AS messageId, COALESCE(a.name, m.from_name, '系统') AS fromName,
-                  m.text, m.task_id AS taskId, m.created_at AS createdAt
+                  m.text, m.task_id AS taskId, m.channel AS channel, m.created_at AS createdAt
            FROM deliveries d
            JOIN messages m ON m.id = d.message_id
            LEFT JOIN agents a ON a.id = m.from_agent_id
@@ -486,6 +578,7 @@ export class OfficeStore {
         fromName: string;
         text: string;
         taskId: string | null;
+        channel: string;
         createdAt: number;
       }>
     );

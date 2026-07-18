@@ -24,6 +24,12 @@ async function main(): Promise<void> {
   office.sweepIdleSessions();
   const sweeper = setInterval(() => office.sweepIdleSessions(), 60_000);
 
+  // 重启不丢活：把上次进程退出时没来得及执行的积压未读重新派发
+  const recovered = office.recoverPendingDispatches();
+  if (recovered > 0) {
+    console.log(`[agent-office] 重启恢复：为 ${recovered} 位托管员工补派了积压消息`);
+  }
+
   const shutdown = async () => {
     clearInterval(sweeper);
     await app.close();

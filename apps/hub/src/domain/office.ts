@@ -1,9 +1,11 @@
 import {
+  HALL_CHANNEL,
   parseMentions,
   SUPERVISOR_NAME,
   type AgentCard,
   type BriefInput,
   type KbDoc,
+  type OfficeGroup,
   type TaskStatus,
 } from "@agent-office/protocol";
 import type { OfficeBus } from "./bus.js";
@@ -14,7 +16,14 @@ import { truncate } from "../util.js";
 
 export type ManagedDispatcher = (
   agent: AgentCard,
-  message: { fromName: string; text: string; taskId?: string | null; raw?: boolean },
+  message: {
+    fromName: string;
+    text: string;
+    taskId?: string | null;
+    raw?: boolean;
+    /** 回复要落回的频道（hall 或项目组 ID） */
+    channel?: string;
+  },
 ) => void;
 
 export const USER_AGENT_NAME = "老板";
@@ -92,6 +101,8 @@ export class OfficeService {
     fromName: string;
     text: string;
     taskId?: string | null;
+    /** 频道：hall（默认大群）或项目组 ID */
+    channel?: string;
   }): {
     messageId: string;
     routed: Array<{ name: string; mode: "managed" | "inbox" | "supervisor" }>;
@@ -100,6 +111,8 @@ export class OfficeService {
     const sender =
       this.store.getAgentByName(input.fromName) ??
       this.store.registerAgent({ name: input.fromName, kind: "user" });
+    const channel =
+      input.channel && this.store.getGroupById(input.channel) ? input.channel : HALL_CHANNEL;
     const roster = this.store.listAgents();
     const rosterNames = roster.map((a) => a.name);
     const { targets, all } = parseMentions(input.text, rosterNames);
@@ -110,11 +123,13 @@ export class OfficeService {
       if (agent && agent.id !== sender.id) targetAgents.set(agent.id, agent);
     }
     if (all) {
-      // @all 只广播给普通成员；主管只响应显式 @主管，避免每次广播都触发自动分派
+      // @all 只广播给普通成员；组频道里只喊本组人；主管只响应显式 @主管
       for (const agent of roster) {
-        if (agent.id !== sender.id && agent.kind !== "user" && agent.kind !== "supervisor") {
-          targetAgents.set(agent.id, agent);
+        if (agent.id === sender.id || agent.kind === "user" || agent.kind === "supervisor") {
+          continue;
         }
+        if (channel !== HALL_CHANNEL && agent.groupId !== channel) continue;
+        targetAgents.set(agent.id, agent);
       }
     }
 
@@ -123,6 +138,7 @@ export class OfficeService {
       text: input.text,
       mentionAgentIds: [...targetAgents.keys()],
       taskId: input.taskId ?? null,
+      channel,
     });
     this.logs.append({
       source: "message",
@@ -150,6 +166,7 @@ export class OfficeService {
           fromName: sender.name,
           text: input.text,
           taskId: input.taskId ?? null,
+          channel,
         });
       } else {
         routed.push({ name: agent.name, mode: "inbox" });
@@ -283,6 +300,46 @@ export class OfficeService {
     return updated;
   }
 
+  // ---------- 项目组 ----------
+
+  createGroup(name: string): { ok: boolean; error?: string; group?: OfficeGroup } {
+    const group = this.store.createGroup(name);
+    if (!group) return { ok: false, error: "组名为空或已存在" };
+    this.event({ type: "group", text: `新建项目组「${group.name}」` });
+    this.emit("group", { groupId: group.id });
+    return { ok: true, group };
+  }
+
+  deleteGroup(groupId: string): { ok: boolean; error?: string } {
+    const group = this.store.getGroupById(groupId);
+    if (!group) return { ok: false, error: "项目组不存在" };
+    this.store.deleteGroup(groupId);
+    this.event({ type: "group", text: `项目组「${group.name}」已解散，成员回到大群` });
+    this.emit("group", { groupId });
+    return { ok: true };
+  }
+
+  assignGroup(agentId: string, groupId: string | null): { ok: boolean; error?: string } {
+    const agent = this.store.getAgentById(agentId);
+    if (!agent) return { ok: false, error: "成员不存在" };
+    if (agent.kind === "user" || agent.kind === "supervisor") {
+      return { ok: false, error: "boss 与主管不归属任何项目组（全频道可见）" };
+    }
+    if (!this.store.setAgentGroup(agentId, groupId)) {
+      return { ok: false, error: "项目组不存在" };
+    }
+    const groupName = groupId ? this.store.getGroupById(groupId)?.name : null;
+    this.event({
+      type: "group",
+      agentId,
+      text: groupName
+        ? `「${agent.name}」加入项目组「${groupName}」`
+        : `「${agent.name}」退出项目组，回到大群`,
+    });
+    this.emit("agent", { agentId });
+    return { ok: true };
+  }
+
   // ---------- Agent 管理 ----------
 
   renameAgent(
@@ -329,7 +386,12 @@ export class OfficeService {
   }
 
   /** 员工回复入群：只播报不再触发 @ 路由，避免托管互相唤醒形成循环 */
-  postReply(agentId: string, text: string, taskId?: string | null): string | null {
+  postReply(
+    agentId: string,
+    text: string,
+    taskId?: string | null,
+    channel?: string,
+  ): string | null {
     const agent = this.store.getAgentById(agentId);
     if (!agent) return null;
     const messageId = this.store.createMessage({
@@ -337,6 +399,7 @@ export class OfficeService {
       text,
       mentionAgentIds: [],
       taskId: taskId ?? null,
+      channel: channel && this.store.getGroupById(channel) ? channel : HALL_CHANNEL,
     });
     this.logs.append({
       source: "message",
@@ -383,10 +446,49 @@ export class OfficeService {
       this.managedDispatcher(fresh, {
         fromName: this.bossName(),
         text: `你离席期间收到以下消息，请逐条处理并汇报结果：\n${backlog}`,
+        channel: pending[pending.length - 1].channel,
       });
     }
     this.emit("agent", { agentId });
     return { ok: true, agent: fresh };
+  }
+
+  /**
+   * 启动恢复：hub 重启会丢内存执行队列，但未读投递全在库里。
+   * 把每个托管员工的积压未读重新派发出去，保证"重启不丢活"（消息表即持久队列）。
+   */
+  recoverPendingDispatches(): number {
+    if (!this.managedDispatcher) return 0;
+    let recovered = 0;
+    for (const agent of this.store.listAgents()) {
+      if (!MANAGED_KINDS.has(agent.kind)) continue;
+      const pending = this.store.pendingMessagesFor(agent.id);
+      if (pending.length === 0) continue;
+      this.store.markDeliveriesRead(agent.id);
+      this.event({
+        type: "run",
+        agentId: agent.id,
+        text: `重启恢复：补派 ${pending.length} 条积压消息`,
+      });
+      if (pending.length === 1) {
+        const only = pending[0];
+        this.managedDispatcher(agent, {
+          fromName: only.fromName,
+          text: only.text,
+          taskId: only.taskId,
+          channel: only.channel,
+        });
+      } else {
+        const backlog = pending.map((m) => `- ${m.fromName}：${m.text}`).join("\n");
+        this.managedDispatcher(agent, {
+          fromName: this.bossName(),
+          text: `办公室重启前你有以下未处理消息，请逐条处理并汇报结果：\n${backlog}`,
+          channel: pending[pending.length - 1].channel,
+        });
+      }
+      recovered += 1;
+    }
+    return recovered;
   }
 
   /**
@@ -591,6 +693,7 @@ export class OfficeService {
   getContext(limitBriefs = 10) {
     return {
       bossName: this.bossName(),
+      groups: this.store.listGroups(),
       roster: this.store.listAgents().map((a) => ({
         name: a.name,
         kind: a.kind,
@@ -598,6 +701,7 @@ export class OfficeService {
         workspace: a.workspace,
         model: (a.meta as { model?: string }).model ?? null,
         title: (a.meta as { title?: string }).title ?? null,
+        group: a.groupName ?? null,
       })),
       openTasks: this.store.listTasks().filter((t) => t.status !== "done" && t.status !== "cancelled"),
       briefs: this.store.listBriefs(limitBriefs),

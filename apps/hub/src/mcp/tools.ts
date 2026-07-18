@@ -96,11 +96,12 @@ export function createMcpServer(office: OfficeService): McpServer {
     {
       title: "发送消息",
       description:
-        "向办公室发送消息。用 @工号 提及其他成员（@all 为全员）。托管成员会被自动唤醒执行，手工会话会在下一轮读到。",
+        "向办公室发送消息。用 @工号 提及其他成员（@all 为全员）。托管成员会被自动唤醒执行，手工会话会在下一轮读到。可选 channel 指定项目组频道（组 ID 见 get_context 的 groups），组频道里 @all 只喊本组人。",
       inputSchema: {
         from_agent: z.string().describe("你的工号"),
         text: z.string().min(1).describe("消息内容，可包含 @工号"),
         task_id: z.string().optional().describe("关联任务 ID"),
+        channel: z.string().optional().describe("频道：项目组 ID，缺省为大群"),
       },
     },
     async (args) => {
@@ -108,6 +109,7 @@ export function createMcpServer(office: OfficeService): McpServer {
         fromName: args.from_agent,
         text: args.text,
         taskId: args.task_id ?? null,
+        channel: args.channel,
       });
       return text({
         ok: true,
@@ -124,7 +126,7 @@ export function createMcpServer(office: OfficeService): McpServer {
     {
       title: "获取办公室上下文",
       description:
-        "获取办公室全景上下文：花名册（成员/模型/职位/工作区）、进行中的任务、最近简报、知识库目录。开始工作前调用一次可快速了解全局。",
+        "获取办公室全景上下文：花名册（成员/模型/职位/工作区/项目组）、项目组列表、进行中的任务、最近简报、知识库目录。开始工作前调用一次可快速了解全局。",
       inputSchema: {
         brief_limit: z.number().int().min(1).max(50).optional().describe("返回简报数量，默认 10"),
       },

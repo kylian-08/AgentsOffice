@@ -4,12 +4,14 @@ import type {
   LogEntry,
   OfficeBrief,
   OfficeEvent,
+  OfficeGroup,
   OfficeMessage,
   OfficeTask,
 } from "@agent-office/protocol";
 
 export interface OfficeState {
   agents: AgentCard[];
+  groups: OfficeGroup[];
   messages: OfficeMessage[];
   tasks: OfficeTask[];
   briefs: OfficeBrief[];
@@ -50,12 +52,20 @@ async function json<T>(res: Response): Promise<T> {
 export const api = {
   state: () => fetch("/api/state").then((r) => json<OfficeState>(r)),
   health: () => fetch("/api/health").then((r) => json<Health>(r)),
-  sendMessage: (text: string) =>
+  sendMessage: (text: string, channel?: string) =>
     fetch("/api/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, channel }),
     }).then((r) => json<{ routed: Array<{ name: string; mode: string }> }>(r)),
+  createGroup: (name: string) =>
+    fetch("/api/groups", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name }),
+    }).then((r) => json<OfficeGroup>(r)),
+  deleteGroup: (id: string) =>
+    fetch(`/api/groups/${id}`, { method: "DELETE" }).then((r) => json<{ ok: boolean }>(r)),
   createTask: (title: string, description: string, assignee: string | null) =>
     fetch("/api/tasks", {
       method: "POST",
@@ -80,7 +90,10 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(input),
     }).then((r) => json<AgentCard>(r)),
-  updateAgent: (id: string, patch: { name?: string; model?: string; title?: string }) =>
+  updateAgent: (
+    id: string,
+    patch: { name?: string; model?: string; title?: string; groupId?: string | null },
+  ) =>
     fetch(`/api/agents/${id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
