@@ -120,6 +120,28 @@ export interface AgentMeta {
   sandbox?: string;
 }
 
+/** 公共知识库文档：沉淀疑难杂症与解决方案，按目录（category）索引 */
+export interface KbDoc {
+  id: string;
+  category: string;
+  title: string;
+  content: string;
+  tags: string[];
+  author: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** 统一日志条目（内存环形缓冲，经 SSE 流式推送） */
+export interface LogEntry {
+  at: number;
+  level: "info" | "warn" | "error";
+  /** 来源：event / message / brief / terminal / run / kb / hub */
+  source: string;
+  agentName: string | null;
+  text: string;
+}
+
 export const SUPERVISOR_NAME = "主管";
 
 const ALL_ALIASES = new Set(["all", "所有人", "全员", "everyone"]);
@@ -176,6 +198,7 @@ export function buildManagedPrompt(opts: {
   }
   lines.push(
     "",
+    "如果本机 MCP 里有 agent-office / agent_office 服务，你还可以：get_context 获取花名册、任务与最近简报；kb_list / kb_read 查公共知识库（疑难杂症与解决方案）；遇到值得沉淀的问题用 kb_write 记录。",
     "请完成消息中的请求。回答的最后用一段话总结你的结果，这段总结会作为简报共享给办公室全员。",
   );
   return lines.join("\n");

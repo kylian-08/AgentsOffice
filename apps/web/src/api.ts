@@ -1,5 +1,7 @@
 import type {
   AgentCard,
+  KbDoc,
+  LogEntry,
   OfficeBrief,
   OfficeEvent,
   OfficeMessage,
@@ -104,4 +106,40 @@ export const api = {
     }).then((r) =>
       json<{ assignedTo: string[]; reason: string; task: OfficeTask }>(r),
     ),
+  logs: (opts: { limit?: number; since?: number; source?: string } = {}) => {
+    const params = new URLSearchParams();
+    if (opts.limit) params.set("limit", String(opts.limit));
+    if (opts.since) params.set("since", String(opts.since));
+    if (opts.source) params.set("source", opts.source);
+    return fetch(`/api/logs?${params}`).then((r) => json<{ logs: LogEntry[] }>(r));
+  },
+  kbCatalog: () =>
+    fetch("/api/kb/catalog").then((r) =>
+      json<{
+        catalog: Array<{
+          category: string;
+          docs: Array<{ id: string; title: string; tags: string[]; updatedAt: number }>;
+        }>;
+      }>(r),
+    ),
+  kbSearch: (q: string) =>
+    fetch(`/api/kb/docs?q=${encodeURIComponent(q)}`).then((r) => json<{ docs: KbDoc[] }>(r)),
+  kbDoc: (id: string) => fetch(`/api/kb/docs/${id}`).then((r) => json<KbDoc>(r)),
+  kbCreate: (input: { category: string; title: string; content: string; tags?: string[] }) =>
+    fetch("/api/kb/docs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    }).then((r) => json<KbDoc>(r)),
+  kbUpdate: (
+    id: string,
+    patch: { category?: string; title?: string; content?: string; tags?: string[] },
+  ) =>
+    fetch(`/api/kb/docs/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(patch),
+    }).then((r) => json<KbDoc>(r)),
+  kbDelete: (id: string) =>
+    fetch(`/api/kb/docs/${id}`, { method: "DELETE" }).then((r) => json<{ ok: boolean }>(r)),
 };

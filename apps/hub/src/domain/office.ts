@@ -3,9 +3,11 @@ import {
   SUPERVISOR_NAME,
   type AgentCard,
   type BriefInput,
+  type KbDoc,
   type TaskStatus,
 } from "@agent-office/protocol";
 import type { OfficeBus } from "./bus.js";
+import { LogBook } from "./logbook.js";
 import type { OfficeStore } from "./store.js";
 import { TerminalLog } from "./terminal.js";
 import { truncate } from "../util.js";
@@ -28,12 +30,23 @@ export class OfficeService {
   /** 正在运行的托管执行的终止函数（agentId → kill） */
   private runKills = new Map<string, () => void>();
   readonly terminals: TerminalLog;
+  readonly logs: LogBook;
 
   constructor(
     readonly store: OfficeStore,
     readonly bus: OfficeBus,
   ) {
     this.terminals = new TerminalLog(bus);
+    this.logs = new LogBook(bus);
+    // 托管终端每一行同时汇入统一日志流
+    this.terminals.onLine = (agentId, line) => {
+      this.logs.append({
+        level: line.kind === "error" ? "error" : "info",
+        source: "terminal",
+        agentName: this.store.getAgentById(agentId)?.name ?? null,
+        text: line.text,
+      });
+    };
     // 确保人类用户与主管席位存在（boss 可能已改过称呼，按 kind 判断）
     if (!store.listAgents().some((a) => a.kind === "user")) {
       store.registerAgent({ name: USER_AGENT_NAME, kind: "user", status: "online" });
@@ -59,6 +72,12 @@ export class OfficeService {
   event(input: { type: string; agentId?: string | null; text?: string | null }): void {
     const event = this.store.insertEvent(input);
     this.emit("event", event);
+    this.logs.append({
+      level: input.type === "run-error" ? "error" : "info",
+      source: "event",
+      agentName: event.agentName,
+      text: `[${input.type}] ${input.text ?? ""}`.trim(),
+    });
   }
 
   // ---------- 消息 ----------
@@ -102,6 +121,11 @@ export class OfficeService {
       text: input.text,
       mentionAgentIds: [...targetAgents.keys()],
       taskId: input.taskId ?? null,
+    });
+    this.logs.append({
+      source: "message",
+      agentName: sender.name,
+      text: truncate(input.text.replaceAll(/\s+/g, " "), 300),
     });
 
     const routed: Array<{ name: string; mode: "managed" | "inbox" | "supervisor" }> = [];
@@ -175,6 +199,11 @@ export class OfficeService {
     });
     if (inserted) {
       this.emit("brief", inserted);
+      this.logs.append({
+        source: "brief",
+        agentName: agent.name,
+        text: `${input.brief.title} — ${truncate(input.brief.result.replaceAll(/\s+/g, " "), 200)}`,
+      });
       this.event({
         type: "brief",
         agentId: agent.id,
@@ -307,6 +336,11 @@ export class OfficeService {
       mentionAgentIds: [],
       taskId: taskId ?? null,
     });
+    this.logs.append({
+      source: "message",
+      agentName: agent.name,
+      text: truncate(text.replaceAll(/\s+/g, " "), 300),
+    });
     this.emit("message", { messageId });
     return messageId;
   }
@@ -407,19 +441,68 @@ export class OfficeService {
     return { task, assignedTo: targets.map((a) => a.name), reason };
   }
 
+  // ---------- 公共知识库 ----------
+
+  kbWrite(input: {
+    id?: string;
+    category: string;
+    title: string;
+    content: string;
+    tags?: string[];
+    author?: string | null;
+  }): { doc: KbDoc; created: boolean } | null {
+    if (input.id) {
+      const doc = this.store.updateKbDoc(input.id, {
+        category: input.category,
+        title: input.title,
+        content: input.content,
+        tags: input.tags,
+      });
+      if (!doc) return null;
+      this.emit("kb", { id: doc.id });
+      this.logs.append({
+        source: "kb",
+        agentName: input.author ?? null,
+        text: `更新知识库文档「${doc.category} / ${doc.title}」`,
+      });
+      return { doc, created: false };
+    }
+    const doc = this.store.createKbDoc(input);
+    this.emit("kb", { id: doc.id });
+    this.event({
+      type: "kb",
+      agentId: input.author ? (this.store.getAgentByName(input.author)?.id ?? null) : null,
+      text: `知识库新增「${doc.category} / ${truncate(doc.title, 50)}」`,
+    });
+    return { doc, created: true };
+  }
+
+  kbDelete(id: string): boolean {
+    const doc = this.store.getKbDoc(id);
+    if (!doc) return false;
+    this.store.deleteKbDoc(id);
+    this.emit("kb", { id });
+    this.logs.append({ source: "kb", text: `删除知识库文档「${doc.category} / ${doc.title}」` });
+    return true;
+  }
+
   // ---------- 上下文 ----------
 
+  /** 办公室全景上下文：花名册、任务、简报、知识库目录（对所有 Agent 开放） */
   getContext(limitBriefs = 10) {
     return {
+      bossName: this.bossName(),
       roster: this.store.listAgents().map((a) => ({
         name: a.name,
         kind: a.kind,
         status: a.status,
         workspace: a.workspace,
         model: (a.meta as { model?: string }).model ?? null,
+        title: (a.meta as { title?: string }).title ?? null,
       })),
       openTasks: this.store.listTasks().filter((t) => t.status !== "done" && t.status !== "cancelled"),
       briefs: this.store.listBriefs(limitBriefs),
+      kbCatalog: this.store.kbCatalog(),
     };
   }
 }

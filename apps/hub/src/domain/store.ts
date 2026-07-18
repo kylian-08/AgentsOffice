@@ -6,6 +6,7 @@ import type {
   AgentKind,
   AgentStatus,
   BriefInput,
+  KbDoc,
   OfficeBrief,
   OfficeEvent,
   OfficeMessage,
@@ -85,6 +86,17 @@ CREATE TABLE IF NOT EXISTS token_usage(
   tokens INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(agent_id, day)
 );
+CREATE TABLE IF NOT EXISTS kb_docs(
+  id TEXT PRIMARY KEY,
+  category TEXT NOT NULL,
+  title TEXT NOT NULL,
+  content TEXT NOT NULL,
+  tags TEXT NOT NULL DEFAULT '[]',
+  author TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_kb_category ON kb_docs(category, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_deliveries_to ON deliveries(to_agent_id, status);
 CREATE INDEX IF NOT EXISTS idx_briefs_created ON briefs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at DESC);
@@ -667,4 +679,132 @@ export class OfficeStore {
       createdAt: r.created_at,
     }));
   }
+
+  // ---------- 公共知识库 ----------
+
+  createKbDoc(input: {
+    category: string;
+    title: string;
+    content: string;
+    tags?: string[];
+    author?: string | null;
+  }): KbDoc {
+    const id = uuid();
+    this.db
+      .prepare(
+        `INSERT INTO kb_docs(id, category, title, content, tags, author, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        input.category.trim(),
+        input.title.trim(),
+        input.content,
+        JSON.stringify(input.tags ?? []),
+        input.author ?? null,
+        now(),
+        now(),
+      );
+    return this.getKbDoc(id)!;
+  }
+
+  updateKbDoc(
+    id: string,
+    patch: { category?: string; title?: string; content?: string; tags?: string[] },
+  ): KbDoc | null {
+    const existing = this.getKbDoc(id);
+    if (!existing) return null;
+    this.db
+      .prepare(
+        `UPDATE kb_docs SET category = ?, title = ?, content = ?, tags = ?, updated_at = ? WHERE id = ?`,
+      )
+      .run(
+        patch.category?.trim() || existing.category,
+        patch.title?.trim() || existing.title,
+        patch.content ?? existing.content,
+        JSON.stringify(patch.tags ?? existing.tags),
+        now(),
+        id,
+      );
+    return this.getKbDoc(id);
+  }
+
+  deleteKbDoc(id: string): boolean {
+    if (!this.getKbDoc(id)) return false;
+    this.db.prepare("DELETE FROM kb_docs WHERE id = ?").run(id);
+    return true;
+  }
+
+  getKbDoc(id: string): KbDoc | null {
+    const row = this.db.prepare("SELECT * FROM kb_docs WHERE id = ?").get(id) as
+      | Record<string, unknown>
+      | undefined;
+    return row ? kbFromRow(row) : null;
+  }
+
+  /** 目录索引：分类 → 文档标题清单（不含正文，供快速索引） */
+  kbCatalog(): Array<{
+    category: string;
+    docs: Array<{ id: string; title: string; tags: string[]; updatedAt: number }>;
+  }> {
+    const rows = this.db
+      .prepare(
+        `SELECT id, category, title, tags, updated_at FROM kb_docs
+         ORDER BY category ASC, updated_at DESC`,
+      )
+      .all() as unknown as Array<Record<string, unknown>>;
+    const byCategory = new Map<
+      string,
+      Array<{ id: string; title: string; tags: string[]; updatedAt: number }>
+    >();
+    for (const row of rows) {
+      const category = row.category as string;
+      const list = byCategory.get(category) ?? [];
+      list.push({
+        id: row.id as string,
+        title: row.title as string,
+        tags: JSON.parse((row.tags as string) ?? "[]"),
+        updatedAt: row.updated_at as number,
+      });
+      byCategory.set(category, list);
+    }
+    return [...byCategory.entries()].map(([category, docs]) => ({ category, docs }));
+  }
+
+  /** 关键词检索：标题/正文/标签/分类 LIKE 匹配 */
+  searchKbDocs(query: string, limit = 20): KbDoc[] {
+    const like = `%${query.trim()}%`;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM kb_docs
+         WHERE title LIKE ? OR content LIKE ? OR tags LIKE ? OR category LIKE ?
+         ORDER BY updated_at DESC LIMIT ?`,
+      )
+      .all(like, like, like, like, limit) as unknown as Array<Record<string, unknown>>;
+    return rows.map(kbFromRow);
+  }
+
+  listKbDocs(category?: string, limit = 100): KbDoc[] {
+    const rows = category
+      ? (this.db
+          .prepare("SELECT * FROM kb_docs WHERE category = ? ORDER BY updated_at DESC LIMIT ?")
+          .all(category, limit) as unknown as Array<Record<string, unknown>>)
+      : (this.db
+          .prepare("SELECT * FROM kb_docs ORDER BY updated_at DESC LIMIT ?")
+          .all(limit) as unknown as Array<Record<string, unknown>>);
+    return rows.map(kbFromRow);
+  }
+}
+
+function kbFromRow(row: Record<string, unknown>): KbDoc {
+  return {
+    id: row.id as string,
+    category: row.category as string,
+    title: row.title as string,
+    content: row.content as string,
+    tags: JSON.parse((row.tags as string) ?? "[]"),
+    author: (row.author as string) ?? null,
+    createdAt: row.created_at as number,
+    updatedAt: row.updated_at as number,
+  };
 }

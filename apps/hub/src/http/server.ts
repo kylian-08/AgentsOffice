@@ -205,6 +205,82 @@ export async function createServer(
     };
   });
 
+  // ---------- 日志（对网页与所有 Agent 开放） ----------
+  app.get("/api/logs", async (request) => {
+    const query = request.query as { limit?: string; since?: string; source?: string };
+    return {
+      logs: office.logs.list({
+        limit: query.limit ? Number(query.limit) : 200,
+        since: query.since ? Number(query.since) : undefined,
+        source: query.source || undefined,
+      }),
+    };
+  });
+
+  // ---------- 公共知识库 ----------
+  app.get("/api/kb/catalog", async () => ({ catalog: office.store.kbCatalog() }));
+
+  app.get("/api/kb/docs", async (request) => {
+    const query = request.query as { category?: string; q?: string };
+    if (query.q?.trim()) return { docs: office.store.searchKbDocs(query.q.trim()) };
+    return { docs: office.store.listKbDocs(query.category?.trim() || undefined) };
+  });
+
+  app.get("/api/kb/docs/:id", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const doc = office.store.getKbDoc(id);
+    if (!doc) return reply.code(404).send({ error: "文档不存在" });
+    return doc;
+  });
+
+  app.post("/api/kb/docs", async (request, reply) => {
+    const body = (request.body ?? {}) as {
+      category?: string;
+      title?: string;
+      content?: string;
+      tags?: string[];
+      author?: string;
+    };
+    if (!body.category?.trim() || !body.title?.trim() || !body.content?.trim()) {
+      return reply.code(400).send({ error: "category、title、content 均不能为空" });
+    }
+    const result = office.kbWrite({
+      category: body.category,
+      title: body.title,
+      content: body.content,
+      tags: body.tags,
+      author: body.author?.trim() || office.bossName(),
+    });
+    return result!.doc;
+  });
+
+  app.patch("/api/kb/docs/:id", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = (request.body ?? {}) as {
+      category?: string;
+      title?: string;
+      content?: string;
+      tags?: string[];
+    };
+    const existing = office.store.getKbDoc(id);
+    if (!existing) return reply.code(404).send({ error: "文档不存在" });
+    const result = office.kbWrite({
+      id,
+      category: body.category ?? existing.category,
+      title: body.title ?? existing.title,
+      content: body.content ?? existing.content,
+      tags: body.tags,
+      author: office.bossName(),
+    });
+    return result!.doc;
+  });
+
+  app.delete("/api/kb/docs/:id", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    if (!office.kbDelete(id)) return reply.code(404).send({ error: "文档不存在" });
+    return { ok: true };
+  });
+
   app.post("/api/dispatch", async (request, reply) => {
     const body = (request.body ?? {}) as {
       title?: string;

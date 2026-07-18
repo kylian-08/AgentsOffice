@@ -44,7 +44,9 @@ export function handleCursorHook(
         `1. 先调用 register_agent 刷新登记：name="${agent.name}"、kind="cursor-ide"、model 填你当前实际使用的 AI 模型名；`,
         `2. 开始处理任务前调用 read_inbox(agent="${agent.name}") 查看 @你的消息（中途换了模型就在 read_inbox 时带 model 参数更新）；`,
         `3. 完成阶段性工作后调用 publish_brief 发布简报；`,
-        `4. 需要其他成员协助时用 send_message 并 @对方工号（get_context 可查花名册）。`,
+        `4. 需要其他成员协助时用 send_message 并 @对方工号；`,
+        `5. get_context 可随时获取办公室全景（花名册/任务/简报/知识库目录），read_logs 可看实时日志；`,
+        `6. 遇到疑难问题先 kb_search / kb_list 查公共知识库，解决了值得沉淀的问题就 kb_write 记录（分类/标题/根因/解决步骤）。`,
       ];
       if (pending > 0) lines.push(`注意：你有 ${pending} 条未读消息，请先 read_inbox。`);
       return { additional_context: lines.join("\n") };
@@ -144,7 +146,9 @@ export function handleClaudeHook(
         `1. 先调用 register_agent 刷新登记：name="${agent.name}"、kind="claude-cli"、model 填你当前实际使用的 AI 模型名；`,
         `2. 开始处理任务前调用 read_inbox(agent="${agent.name}") 查看 @你的消息；`,
         `3. 完成阶段性工作后调用 publish_brief 发布简报；`,
-        `4. 需要其他成员协助时用 send_message 并 @对方工号。`,
+        `4. 需要其他成员协助时用 send_message 并 @对方工号；`,
+        `5. get_context 可获取办公室全景（花名册/任务/简报/知识库目录），read_logs 可看实时日志；`,
+        `6. 遇到疑难问题先 kb_search 查公共知识库，解决后用 kb_write 沉淀方案。`,
       ];
       if (pending > 0) lines.push(`注意：你有 ${pending} 条未读消息，请先 read_inbox。`);
       return {

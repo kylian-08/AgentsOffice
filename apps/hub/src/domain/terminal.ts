@@ -15,6 +15,8 @@ export interface TermLine {
  */
 export class TerminalLog {
   private buffers = new Map<string, TermLine[]>();
+  /** 每写入一行同时回调（用于汇入统一日志流） */
+  onLine: ((agentId: string, line: TermLine) => void) | null = null;
 
   constructor(
     private readonly bus: OfficeBus,
@@ -23,9 +25,15 @@ export class TerminalLog {
 
   push(agentId: string, text: string, kind: TermLineKind = "out"): void {
     const buffer = this.buffers.get(agentId) ?? [];
-    for (const line of text.split(/\r?\n/)) {
-      if (!line.trim()) continue;
-      buffer.push({ at: now(), kind, text: line.length > 2000 ? `${line.slice(0, 2000)}…` : line });
+    for (const raw of text.split(/\r?\n/)) {
+      if (!raw.trim()) continue;
+      const line: TermLine = {
+        at: now(),
+        kind,
+        text: raw.length > 2000 ? `${raw.slice(0, 2000)}…` : raw,
+      };
+      buffer.push(line);
+      this.onLine?.(agentId, line);
     }
     if (buffer.length > this.limit) buffer.splice(0, buffer.length - this.limit);
     this.buffers.set(agentId, buffer);

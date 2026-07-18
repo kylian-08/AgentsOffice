@@ -55,8 +55,9 @@ alwaysApply: true
 1. 会话开始处理任务前，先调用 \`register_agent\` 登记（沿用系统注入的工号；若无则自拟简短工号；\`model\` 参数填你当前实际使用的 AI 模型名）。
 2. 开始新一轮工作前调用 \`read_inbox\` 查看是否有 @你 的消息，优先响应同事的协作请求；中途切换了模型就在 \`read_inbox\` 时带 \`model\` 参数更新。
 3. 完成阶段性工作后调用 \`publish_brief\` 发布结构化简报（结果/进展/决策/产物/阻塞/下一步）。
-4. 需要其他成员协助时用 \`send_message\` 并 @对方工号；\`get_context\` 可查看花名册、任务与最新简报。
+4. 需要其他成员协助时用 \`send_message\` 并 @对方工号；\`get_context\` 可获取办公室全景上下文（花名册/任务/简报/知识库目录）。
 5. 认领任务用 \`claim_task\`，状态变化及时 \`update_task\`。
+6. 遇到疑难问题先 \`kb_search\` / \`kb_list\` 查公共知识库；解决了值得沉淀的问题用 \`kb_write\` 记录（分类/标题/根因/解决步骤）。\`read_logs\` 可查看办公室实时日志。
 `;
 
 const AGENTS_MD_BLOCK = `## Agent Office 协作协议（Codex）
@@ -65,7 +66,8 @@ const AGENTS_MD_BLOCK = `## Agent Office 协作协议（Codex）
 
 - 会话开始处理任务前，调用 \`register_agent\` 登记（kind 填 \`codex-cli\`，工号自拟且保持稳定，如 \`codex-主力\`；\`model\` 填你当前使用的模型名）。
 - 每轮开始前调用 \`read_inbox\` 查看 @你 的消息；完成阶段性工作后调用 \`publish_brief\` 发布简报。
-- 需要其他成员（含 Cursor 中的 Agent）协助时，用 \`send_message\` 并 @对方工号；\`get_context\` 可查花名册与最新简报。`;
+- 需要其他成员（含 Cursor 中的 Agent）协助时，用 \`send_message\` 并 @对方工号；\`get_context\` 可获取办公室全景上下文（花名册/任务/简报/知识库目录）。
+- 遇到疑难问题先 \`kb_search\` 查公共知识库；解决后用 \`kb_write\` 沉淀方案；\`read_logs\` 可查看办公室实时日志。`;
 
 const CLAUDE_MD_BLOCK = `## Agent Office 协作协议（Claude Code）
 
@@ -73,7 +75,8 @@ const CLAUDE_MD_BLOCK = `## Agent Office 协作协议（Claude Code）
 你的工号会在会话开始时由系统注入（claude-xxxxxx）。
 
 - 每轮开始前调用 \`read_inbox\` 查看 @你 的消息；完成阶段性工作后调用 \`publish_brief\` 发布简报。
-- 需要其他成员（含 Cursor/Codex 中的 Agent）协助时，用 \`send_message\` 并 @对方工号；\`get_context\` 可查花名册与最新简报。`;
+- 需要其他成员（含 Cursor/Codex 中的 Agent）协助时，用 \`send_message\` 并 @对方工号；\`get_context\` 可获取办公室全景上下文（花名册/任务/简报/知识库目录）。
+- 遇到疑难问题先 \`kb_search\` 查公共知识库；解决后用 \`kb_write\` 沉淀方案；\`read_logs\` 可查看办公室实时日志。`;
 
 /** 用户级路径：三家客户端在任意目录启动都能自动入驻 */
 interface UserPaths {

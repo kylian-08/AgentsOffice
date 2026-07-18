@@ -6,7 +6,14 @@ import {
   useState,
 } from "react";
 import { AGENT_KIND_LABELS, SUPERVISOR_NAME } from "@agent-office/protocol";
-import type { AgentCard, AgentMeta, OfficeBrief, OfficeTask } from "@agent-office/protocol";
+import type {
+  AgentCard,
+  AgentMeta,
+  KbDoc,
+  LogEntry,
+  OfficeBrief,
+  OfficeTask,
+} from "@agent-office/protocol";
 import { api, type Health, type OfficeState, type TerminalPane } from "./api";
 
 const STATUS_LABELS: Record<string, string> = {
@@ -1131,13 +1138,344 @@ function Feed({ state }: { state: OfficeState }) {
   );
 }
 
+// ---------- 日志页 ----------
+
+const LOG_SOURCES: Array<{ id: string; label: string }> = [
+  { id: "", label: "全部" },
+  { id: "message", label: "消息" },
+  { id: "event", label: "事件" },
+  { id: "brief", label: "简报" },
+  { id: "terminal", label: "终端" },
+  { id: "kb", label: "知识库" },
+];
+
+function LogsBoard() {
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [source, setSource] = useState("");
+  const [paused, setPaused] = useState(false);
+  const pausedRef = useRef(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    pausedRef.current = paused;
+  }, [paused]);
+
+  useEffect(() => {
+    api.logs({ limit: 500 }).then(({ logs: initial }) => setLogs(initial)).catch(() => {});
+    const es = new EventSource("/api/events");
+    es.onmessage = (e) => {
+      if (pausedRef.current) return;
+      try {
+        const event = JSON.parse(e.data);
+        if (event?.type === "log" && event.payload) {
+          setLogs((prev) => [...prev.slice(-1999), event.payload as LogEntry]);
+        }
+      } catch {
+        /* 忽略坏帧 */
+      }
+    };
+    return () => es.close();
+  }, []);
+
+  const filtered = source ? logs.filter((l) => l.source === source) : logs;
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el && !paused) el.scrollTop = el.scrollHeight;
+  }, [filtered.length, paused]);
+
+  return (
+    <div className="logs-wrap">
+      <header className="logs-toolbar">
+        <div className="logs-filters" role="tablist">
+          {LOG_SOURCES.map((s) => (
+            <button
+              key={s.id}
+              className={source === s.id ? "active" : ""}
+              onClick={() => setSource(s.id)}
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+        <div className="logs-actions">
+          <span className="logs-count">{filtered.length} 条</span>
+          <button className="ghost-btn" onClick={() => setPaused((v) => !v)}>
+            {paused ? "▶ 继续滚动" : "⏸ 暂停滚动"}
+          </button>
+        </div>
+      </header>
+      <div className="logs-screen" role="log" aria-live="polite" ref={scrollRef}>
+        {filtered.length === 0 && <p className="empty">暂无日志。办公室里的消息、事件、简报、终端输出都会实时出现在这里。</p>}
+        {filtered.map((log, index) => (
+          <div key={`${log.at}-${index}`} className={`log-line level-${log.level}`}>
+            <time>{clockTime(log.at)}</time>
+            <em className={`log-source src-${log.source}`}>{LOG_SOURCES.find((s) => s.id === log.source)?.label ?? log.source}</em>
+            {log.agentName && <strong>{log.agentName}</strong>}
+            <span>{log.text}</span>
+          </div>
+        ))}
+      </div>
+      <p className="logs-hint">
+        本页数据同样开放给所有 Agent：MCP 工具 <code>read_logs</code> 或 <code>GET /api/logs</code>（支持 limit / since / source 参数）。
+      </p>
+    </div>
+  );
+}
+
+// ---------- 知识库页 ----------
+
+type KbCatalog = Array<{
+  category: string;
+  docs: Array<{ id: string; title: string; tags: string[]; updatedAt: number }>;
+}>;
+
+function KbBoard({ refreshKey }: { refreshKey: number }) {
+  const [catalog, setCatalog] = useState<KbCatalog>([]);
+  const [selectedId, setSelectedId] = useState("");
+  const [doc, setDoc] = useState<KbDoc | null>(null);
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<KbDoc[] | null>(null);
+  const [editing, setEditing] = useState<null | { id?: string; category: string; title: string; content: string; tags: string }>(null);
+  const [error, setError] = useState("");
+
+  const loadCatalog = useCallback(() => {
+    api.kbCatalog().then(({ catalog: c }) => setCatalog(c)).catch((e) => setError(e.message));
+  }, []);
+
+  useEffect(loadCatalog, [loadCatalog, refreshKey]);
+
+  useEffect(() => {
+    if (!selectedId) {
+      setDoc(null);
+      return;
+    }
+    api.kbDoc(selectedId).then(setDoc).catch(() => setDoc(null));
+  }, [selectedId]);
+
+  const search = async () => {
+    if (!query.trim()) {
+      setResults(null);
+      return;
+    }
+    try {
+      const { docs } = await api.kbSearch(query.trim());
+      setResults(docs);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const save = async () => {
+    if (!editing) return;
+    const tags = editing.tags.split(/[,，、\s]+/).map((t) => t.trim()).filter(Boolean);
+    try {
+      if (editing.id) {
+        const updated = await api.kbUpdate(editing.id, {
+          category: editing.category,
+          title: editing.title,
+          content: editing.content,
+          tags,
+        });
+        setSelectedId(updated.id);
+        setDoc(updated);
+      } else {
+        const created = await api.kbCreate({
+          category: editing.category,
+          title: editing.title,
+          content: editing.content,
+          tags,
+        });
+        setSelectedId(created.id);
+      }
+      setEditing(null);
+      setError("");
+      loadCatalog();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const remove = async (id: string) => {
+    if (!window.confirm("确定删除这篇知识库文档吗？")) return;
+    try {
+      await api.kbDelete(id);
+      if (selectedId === id) setSelectedId("");
+      loadCatalog();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const totalDocs = catalog.reduce((sum, c) => sum + c.docs.length, 0);
+
+  return (
+    <div className="kb-wrap">
+      <aside className="kb-sidebar">
+        <div className="kb-search">
+          <input
+            placeholder="搜索疑难杂症 / 解决方案…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && void search()}
+          />
+          {results !== null && (
+            <button className="ghost-btn sm" onClick={() => { setResults(null); setQuery(""); }}>
+              清除
+            </button>
+          )}
+        </div>
+        <button
+          className="primary-btn kb-new"
+          onClick={() => setEditing({ category: "", title: "", content: "", tags: "" })}
+        >
+          ＋ 新建文档
+        </button>
+        {results !== null ? (
+          <div className="kb-tree">
+            <div className="kb-cat-head">搜索结果（{results.length}）</div>
+            {results.map((d) => (
+              <button
+                key={d.id}
+                className={`kb-doc ${d.id === selectedId ? "active" : ""}`}
+                onClick={() => setSelectedId(d.id)}
+              >
+                <span>{d.title}</span>
+                <small>{d.category}</small>
+              </button>
+            ))}
+            {results.length === 0 && <p className="empty">没有匹配的文档。</p>}
+          </div>
+        ) : (
+          <div className="kb-tree">
+            {catalog.length === 0 && (
+              <p className="empty">
+                知识库还是空的。把遇到的疑难杂症和解决方案沉淀进来，全办公室共享；Agent 也能通过 kb_write 自动写入。
+              </p>
+            )}
+            {catalog.map((cat) => (
+              <div key={cat.category} className="kb-cat">
+                <div className="kb-cat-head">
+                  {cat.category}
+                  <small>{cat.docs.length}</small>
+                </div>
+                {cat.docs.map((d) => (
+                  <button
+                    key={d.id}
+                    className={`kb-doc ${d.id === selectedId ? "active" : ""}`}
+                    onClick={() => setSelectedId(d.id)}
+                  >
+                    <span>{d.title}</span>
+                    {d.tags.length > 0 && <small>{d.tags.join(" · ")}</small>}
+                  </button>
+                ))}
+              </div>
+            ))}
+          </div>
+        )}
+        <p className="kb-stat">{totalDocs} 篇文档 · {catalog.length} 个目录</p>
+      </aside>
+
+      <section className="kb-main">
+        {error && <p className="form-error">{error}</p>}
+        {editing ? (
+          <div className="kb-editor">
+            <h3>{editing.id ? "编辑文档" : "新建知识库文档"}</h3>
+            <div className="kb-editor-row">
+              <input
+                placeholder="目录分类（如 构建打包 / 网络代理 / Windows 环境）"
+                value={editing.category}
+                list="kb-categories"
+                onChange={(e) => setEditing({ ...editing, category: e.target.value })}
+              />
+              <datalist id="kb-categories">
+                {catalog.map((c) => (
+                  <option key={c.category} value={c.category} />
+                ))}
+              </datalist>
+              <input
+                placeholder="标签（逗号分隔，可选）"
+                value={editing.tags}
+                onChange={(e) => setEditing({ ...editing, tags: e.target.value })}
+              />
+            </div>
+            <input
+              placeholder="标题：一句话概括问题"
+              value={editing.title}
+              onChange={(e) => setEditing({ ...editing, title: e.target.value })}
+            />
+            <textarea
+              placeholder={"建议结构：\n【问题现象】\n【根因】\n【解决步骤】\n【验证方式】"}
+              rows={16}
+              value={editing.content}
+              onChange={(e) => setEditing({ ...editing, content: e.target.value })}
+            />
+            <div className="form-actions">
+              <button
+                className="primary-btn"
+                disabled={!editing.category.trim() || !editing.title.trim() || !editing.content.trim()}
+                onClick={() => void save()}
+              >
+                保存
+              </button>
+              <button className="ghost-btn" onClick={() => setEditing(null)}>
+                取消
+              </button>
+            </div>
+          </div>
+        ) : doc ? (
+          <article className="kb-article">
+            <header>
+              <div>
+                <span className="kb-crumb">{doc.category}</span>
+                <h2>{doc.title}</h2>
+                <p className="kb-meta">
+                  {doc.author ? `${doc.author} · ` : ""}更新于 {timeAgo(doc.updatedAt)}
+                  {doc.tags.length > 0 && <> · {doc.tags.map((t) => <span key={t} className="kb-tag">{t}</span>)}</>}
+                </p>
+              </div>
+              <div className="kb-article-actions">
+                <button
+                  className="ghost-btn sm"
+                  onClick={() =>
+                    setEditing({
+                      id: doc.id,
+                      category: doc.category,
+                      title: doc.title,
+                      content: doc.content,
+                      tags: doc.tags.join(", "),
+                    })
+                  }
+                >
+                  编辑
+                </button>
+                <button className="ghost-btn sm danger" onClick={() => void remove(doc.id)}>
+                  删除
+                </button>
+              </div>
+            </header>
+            <pre className="kb-content">{doc.content}</pre>
+          </article>
+        ) : (
+          <div className="kb-placeholder">
+            <p>从左侧目录选择文档，或新建一篇。</p>
+            <p className="kb-placeholder-sub">
+              所有 Agent 都能读写这里：MCP 工具 <code>kb_list</code> / <code>kb_search</code> / <code>kb_read</code> / <code>kb_write</code>。
+            </p>
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
 // ---------- 主应用 ----------
 
 export function App() {
   const [state, setState] = useState<OfficeState | null>(null);
   const [health, setHealth] = useState<Health | null>(null);
   const [mentionPrefill, setMentionPrefill] = useState("");
-  const [view, setView] = useState<"office" | "live" | "terminal">("office");
+  const [view, setView] = useState<"office" | "live" | "terminal" | "logs" | "kb">("office");
   const [onboardOpen, setOnboardOpen] = useState(false);
   const refreshTimer = useRef<number | null>(null);
 
@@ -1230,6 +1568,22 @@ export function App() {
           >
             终端管理
           </button>
+          <button
+            role="tab"
+            aria-selected={view === "logs"}
+            className={view === "logs" ? "active" : ""}
+            onClick={() => setView("logs")}
+          >
+            日志
+          </button>
+          <button
+            role="tab"
+            aria-selected={view === "kb"}
+            className={view === "kb" ? "active" : ""}
+            onClick={() => setView("kb")}
+          >
+            知识库
+          </button>
         </nav>
         <div className="topbar-right">
           <div className="health" aria-label="系统状态">
@@ -1257,6 +1611,14 @@ export function App() {
       ) : view === "terminal" ? (
         <main className="terminal-main">
           <TerminalBoard refreshKey={state.events.length} />
+        </main>
+      ) : view === "logs" ? (
+        <main className="logs-main">
+          <LogsBoard />
+        </main>
+      ) : view === "kb" ? (
+        <main className="kb-page">
+          <KbBoard refreshKey={state.events.length} />
         </main>
       ) : (
         <main className="layout">

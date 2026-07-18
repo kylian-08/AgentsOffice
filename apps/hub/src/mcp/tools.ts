@@ -123,12 +123,147 @@ export function createMcpServer(office: OfficeService): McpServer {
     "get_context",
     {
       title: "获取办公室上下文",
-      description: "获取花名册、进行中的任务和最近简报，用于了解其他成员的工作进展。",
+      description:
+        "获取办公室全景上下文：花名册（成员/模型/职位/工作区）、进行中的任务、最近简报、知识库目录。开始工作前调用一次可快速了解全局。",
       inputSchema: {
         brief_limit: z.number().int().min(1).max(50).optional().describe("返回简报数量，默认 10"),
       },
     },
     async (args) => text(office.getContext(args.brief_limit ?? 10)),
+  );
+
+  server.registerTool(
+    "read_logs",
+    {
+      title: "读取办公室日志",
+      description:
+        "读取办公室统一日志流（消息、事件、简报、托管终端输出）。可按来源过滤、按时间增量拉取，用于了解办公室里正在发生什么。",
+      inputSchema: {
+        limit: z.number().int().min(1).max(500).optional().describe("返回条数，默认 100"),
+        since: z
+          .number()
+          .int()
+          .optional()
+          .describe("只取该毫秒时间戳之后的日志（增量拉取）"),
+        source: z
+          .enum(["event", "message", "brief", "terminal", "kb"])
+          .optional()
+          .describe("按来源过滤"),
+      },
+    },
+    async (args) =>
+      text({
+        ok: true,
+        logs: office.logs.list({
+          limit: args.limit ?? 100,
+          since: args.since,
+          source: args.source,
+        }),
+      }),
+  );
+
+  server.registerTool(
+    "kb_list",
+    {
+      title: "知识库目录",
+      description:
+        "列出公共知识库的目录索引（分类 → 文档标题/标签），或某一分类下的文档摘要。遇到疑难问题先来这里找现成解法。",
+      inputSchema: {
+        category: z.string().optional().describe("只看某个分类，可选"),
+      },
+    },
+    async (args) => {
+      if (args.category?.trim()) {
+        const docs = office.store.listKbDocs(args.category.trim());
+        return text({
+          ok: true,
+          category: args.category.trim(),
+          docs: docs.map((d) => ({
+            id: d.id,
+            title: d.title,
+            tags: d.tags,
+            excerpt: d.content.slice(0, 120),
+            updatedAt: new Date(d.updatedAt).toISOString(),
+          })),
+        });
+      }
+      return text({ ok: true, catalog: office.store.kbCatalog() });
+    },
+  );
+
+  server.registerTool(
+    "kb_read",
+    {
+      title: "读取知识库文档",
+      description: "按 ID 读取一篇知识库文档的完整内容（疑难杂症与解决方案）。",
+      inputSchema: {
+        id: z.string().describe("文档 ID（可用 kb_list / kb_search 找到）"),
+      },
+    },
+    async (args) => {
+      const doc = office.store.getKbDoc(args.id);
+      if (!doc) return text({ ok: false, error: "文档不存在" });
+      return text({ ok: true, doc });
+    },
+  );
+
+  server.registerTool(
+    "kb_search",
+    {
+      title: "搜索知识库",
+      description: "按关键词搜索知识库（标题/正文/标签/分类），返回匹配的文档。",
+      inputSchema: {
+        query: z.string().min(1).describe("关键词"),
+        limit: z.number().int().min(1).max(50).optional().describe("返回条数，默认 10"),
+      },
+    },
+    async (args) => {
+      const docs = office.store.searchKbDocs(args.query, args.limit ?? 10);
+      return text({
+        ok: true,
+        count: docs.length,
+        docs: docs.map((d) => ({
+          id: d.id,
+          category: d.category,
+          title: d.title,
+          tags: d.tags,
+          excerpt: d.content.slice(0, 200),
+        })),
+      });
+    },
+  );
+
+  server.registerTool(
+    "kb_write",
+    {
+      title: "写入知识库",
+      description:
+        "把遇到的疑难杂症及解决方案沉淀到公共知识库。带 id 为更新既有文档，不带 id 为新增。建议格式：问题现象 / 根因 / 解决步骤 / 验证方式。",
+      inputSchema: {
+        agent: z.string().describe("你的工号（作为文档作者）"),
+        id: z.string().optional().describe("要更新的文档 ID，新增时不填"),
+        category: z
+          .string()
+          .min(1)
+          .max(60)
+          .describe("目录分类，如「构建打包」「网络代理」「Windows 环境」"),
+        title: z.string().min(1).max(200).describe("文档标题，一句话概括问题"),
+        content: z.string().min(1).describe("正文：问题现象、根因、解决步骤、验证方式"),
+        tags: z.array(z.string()).optional().describe("标签，便于检索"),
+      },
+    },
+    async (args) => {
+      const result = office.kbWrite({
+        id: args.id,
+        category: args.category,
+        title: args.title,
+        content: args.content,
+        tags: args.tags,
+        author: args.agent,
+      });
+      if (!result) return text({ ok: false, error: "要更新的文档不存在" });
+      return text({ ok: true, created: result.created, id: result.doc.id });
+    },
   );
 
   server.registerTool(
