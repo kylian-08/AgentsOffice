@@ -52,8 +52,9 @@ pnpm start
 | `<workspace>/.cursor/rules/agent-office.mdc` | Cursor 协作规则 |
 | `<workspace>/AGENTS.md` | Codex 协作协议块 |
 | `~/.codex/config.toml` | Codex MCP + notify 回帧 |
-| `<workspace>/.claude/settings.json` | Claude Code hooks |
-| `<workspace>/.mcp.json` | Claude Code 接入办公室 MCP |
+| `~/.claude/settings.json` | Claude Code hooks（用户级，任意目录启动都生效） |
+| Claude 用户级 MCP | 自动执行 `claude mcp add --scope user agent-office`（CLI 不存在时给出手工命令） |
+| `<workspace>/.mcp.json` | Claude Code 项目级 MCP（团队共享用） |
 | `<workspace>/CLAUDE.md` | Claude Code 协作协议块 |
 
 ## 工作原理

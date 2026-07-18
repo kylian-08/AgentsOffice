@@ -1,3 +1,4 @@
+import { execSync } from "node:child_process";
 import {
   copyFileSync,
   existsSync,
@@ -94,10 +95,43 @@ function resolvePaths(workspace: string): InstallPaths {
     cursorRule: join(workspace, ".cursor", "rules", "agent-office.mdc"),
     agentsMd: join(workspace, "AGENTS.md"),
     codexConfig: join(homedir(), ".codex", "config.toml"),
-    claudeSettings: join(workspace, ".claude", "settings.json"),
+    // Claude hooks 装到用户级：无论在哪个目录启动 claude 都能自动入驻
+    claudeSettings: join(homedir(), ".claude", "settings.json"),
     claudeMcp: join(workspace, ".mcp.json"),
     claudeMd: join(workspace, "CLAUDE.md"),
   };
+}
+
+/** 注册/刷新 Claude 用户级 MCP（幂等：先删后加，失败不阻塞安装） */
+function registerClaudeUserMcp(mcpUrl: string): boolean {
+  try {
+    try {
+      execSync("claude mcp remove --scope user agent-office", {
+        stdio: "ignore",
+        timeout: 15_000,
+      });
+    } catch {
+      /* 不存在时忽略 */
+    }
+    execSync(`claude mcp add --scope user --transport http agent-office ${mcpUrl}`, {
+      stdio: "ignore",
+      timeout: 15_000,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function removeClaudeUserMcp(): void {
+  try {
+    execSync("claude mcp remove --scope user agent-office", {
+      stdio: "ignore",
+      timeout: 15_000,
+    });
+  } catch {
+    /* CLI 不存在或未注册时忽略 */
+  }
 }
 
 export function install(workspace: string): void {
@@ -154,7 +188,7 @@ export function install(workspace: string): void {
     );
   }
 
-  // 6. Claude Code：项目级 hooks + MCP + CLAUDE.md 协作协议
+  // 6. Claude Code：用户级 hooks + 用户级 MCP + 项目级 .mcp.json / CLAUDE.md
   const claudeSettingsBackup = backup(paths.claudeSettings);
   if (claudeSettingsBackup) backups.push(claudeSettingsBackup);
   mkdirSync(dirname(paths.claudeSettings), { recursive: true });
@@ -177,6 +211,15 @@ export function install(workspace: string): void {
     upsertMarkerBlock(readIfExists(paths.claudeMd), CLAUDE_MD_BLOCK),
     "utf8",
   );
+  // 用户级 MCP：让任意目录启动的 claude 会话都能调用办公室工具
+  // （.mcp.json 只在项目目录内生效，这里再注册一份 user scope）
+  if (registerClaudeUserMcp(mcpUrl)) {
+    notes.push("已注册 Claude 用户级 MCP（claude mcp add --scope user agent-office）。");
+  } else {
+    notes.push(
+      `未检测到 claude CLI 或注册失败；如需在项目目录外使用，请手工执行：claude mcp add --scope user --transport http agent-office ${mcpUrl}`,
+    );
+  }
 
   console.log("[agent-office] 安装完成。");
   console.log(`  工作区: ${workspace}`);
@@ -189,7 +232,7 @@ export function install(workspace: string): void {
   console.log("  下一步:");
   console.log("    1. 启动中枢: cd agent-office && pnpm start（或双击 启动办公室.bat）");
   console.log(`    2. 打开网页: http://127.0.0.1:${config.port}`);
-  console.log("    3. 重启 Cursor 会话与 Codex 终端以加载新配置。");
+  console.log("    3. 重启 Cursor 会话、Codex 终端与 Claude Code 会话以加载新配置。");
 }
 
 export function uninstall(workspace: string): void {
@@ -243,6 +286,7 @@ export function uninstall(workspace: string): void {
     writeFileSync(paths.claudeMd, removeMarkerBlock(claudeMd), "utf8");
     touched.push(paths.claudeMd);
   }
+  removeClaudeUserMcp();
   console.log("[agent-office] 已卸载接入配置（均有备份）。规则文件如需删除请手工移除：");
   console.log(`  - ${paths.cursorRule}`);
   for (const t of touched) console.log(`  已更新: ${t}`);
