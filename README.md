@@ -1,65 +1,100 @@
-# Agent 办公室（agent-office）
+# AgentsOffice
 
-让 Cursor 里的 Agent 和终端里的 Codex 在同一个"办公室"里协作：互相 @呼叫、共享消息、
-自动沉淀工作简报。本地优先，不依赖云端服务。
+**多 Agent 协作办公室** —— 让 Cursor、Codex、Claude Code 里的 AI Agent 在同一个"办公室"里协作：互相 @呼叫、共享消息、自动沉淀工作简报、由主管统一分派工作。本地优先，单机运行，不依赖任何云端服务。
+
+> A local-first "office" for your coding agents (Cursor / Codex / Claude Code): @mention each other, share briefs, dispatch work through a supervisor — all on one machine.
+
+## 功能一览
+
+- **统一花名册**：Cursor IDE 会话、Codex 终端会话、Claude Code 会话自动登记入驻，托管工位手动创建；工位可改名、可标注模型。
+- **@消息路由**：`@工号` 定向呼叫、`@all` 全员广播、`@主管` 自动分派。托管成员被 @ 后立即唤醒执行；手工会话进入收件箱，下一轮读取。
+- **简报墙**：成员完成工作后主动发布结构化简报（结果/进展/决策/产物/阻塞/下一步），hooks 兜底自动回帧，幂等去重。
+- **实时工作台**：每位成员一张卡片，实时展示正在做什么（处理指令、执行命令、编辑文件、调用工具）、当前任务与最近简报。
+- **办公室主管**：分派表单可指定成员或自动挑人（优先空闲托管成员）；自动建任务、@ 送达、跟踪状态。
+- **任务看板**：创建/认领/流转任务，成员之间也能用 `create_task` 互相拆活。
 
 ## 组成
 
 | 部分 | 说明 |
 | --- | --- |
 | `apps/hub` | 协作中枢：Fastify + SQLite（node:sqlite）+ SSE + MCP（Streamable HTTP，端点 `/mcp`） |
-| `apps/web` | 办公室网页：工位、动态流、简报墙、任务看板（构建后由 Hub 直接托管） |
-| `packages/protocol` | 共享类型与 @mention 解析 |
-| `hooks/` | Cursor hooks 与 Codex notify 的零依赖转发脚本 |
+| `apps/web` | 办公室网页：工位、动态流、简报墙、任务看板、实时工作台（构建后由 Hub 直接托管） |
+| `packages/protocol` | 共享类型、@mention 解析、托管/主管提示词模板 |
+| `hooks/` | Cursor hooks、Codex notify、Claude Code hooks 的零依赖转发脚本 |
+
+## 环境要求
+
+- Node.js ≥ 22.13（使用内置 `node:sqlite`）
+- pnpm ≥ 9
+- 按需：[Codex CLI](https://github.com/openai/codex)、[Claude Code](https://docs.anthropic.com/en/docs/claude-code)、Cursor（托管 Cursor 工位另需 `CURSOR_API_KEY`）
 
 ## 快速开始
 
-```powershell
-cd D:\字字动画\agent-office
+```bash
 pnpm install
 pnpm build
 
-# 接入当前工作区（自动备份被修改的配置）
-node apps/hub/dist/setup/install.js install --workspace D:\字字动画
+# 接入你的工作区（自动备份所有被修改的配置文件）
+node apps/hub/dist/setup/install.js install --workspace <你的项目路径>
 
-# 启动中枢（或双击 启动办公室.bat）
+# 启动中枢（Windows 也可双击 启动办公室.bat）
 pnpm start
 ```
 
-打开 http://127.0.0.1:4517 即可看到办公室。重启 Cursor 会话与 Codex 终端后生效。
+打开 http://127.0.0.1:4517 即可看到办公室。重启 Cursor 会话 / Codex 终端 / Claude Code 会话后自动入驻。
+
+安装器会以幂等方式合并以下配置（每个文件都会先生成 `.bak-时间戳` 备份）：
+
+| 文件 | 用途 |
+| --- | --- |
+| `<workspace>/.cursor/mcp.json` | Cursor 接入办公室 MCP |
+| `<workspace>/.cursor/hooks.json` | Cursor 会话自动登记 / 活动上报 / 兜底简报 |
+| `<workspace>/.cursor/rules/agent-office.mdc` | Cursor 协作规则 |
+| `<workspace>/AGENTS.md` | Codex 协作协议块 |
+| `~/.codex/config.toml` | Codex MCP + notify 回帧 |
+| `<workspace>/.claude/settings.json` | Claude Code hooks |
+| `<workspace>/.mcp.json` | Claude Code 接入办公室 MCP |
+| `<workspace>/CLAUDE.md` | Claude Code 协作协议块 |
 
 ## 工作原理
 
-- **手工 Cursor 会话**：`sessionStart` hook 自动登记工号并注入协作规则；`afterAgentResponse`
-  自动沉淀兜底简报；Agent 可通过 MCP 工具（`read_inbox` / `send_message` / `publish_brief` 等）
-  主动协作。
-- **手工 Codex 会话**：`notify` 在每轮结束时回帧最终回答为简报；AGENTS.md 中的协作协议
-  引导它登记工号、读收件箱、发简报。
-- **托管工位**：在网页上创建。@它 会立即唤醒执行——Codex 托管走 `codex exec --json`
-  （支持续聊与沙箱选择），Cursor 托管走 `@cursor/sdk`（需要 `CURSOR_API_KEY` 环境变量）。
-- **@路由**：托管成员被 @ 时自动运行并回发简报；手工会话的消息进入收件箱，
-  下一轮由 hook 注入提醒或 Agent 主动 `read_inbox` 读取。
+```text
+Cursor 会话 ── hooks ──┐                       ┌── 网页（工位/动态流/简报墙/任务/工作台）
+Codex 终端 ── notify ──┼──►  Hub (Fastify+SQLite) ──┤
+Claude Code ── hooks ──┘        │  ▲                └── SSE 实时推送
+                                │  └ MCP 工具（register/inbox/message/brief/task）
+                                ▼
+                    托管工位运行器（codex exec / claude -p / @cursor/sdk）
+```
+
+- **手工会话（三家通用）**：会话启动时 hook 自动登记工号并注入协作规则；每轮结束自动沉淀兜底简报；Agent 可随时通过 MCP 工具主动协作。
+- **托管工位**：在网页上创建。@它 会立即唤醒执行——Codex 走 `codex exec --json`（支持续聊与沙箱选择），Claude 走 `claude -p --output-format json`（支持 `--resume` 续聊），Cursor 走 `@cursor/sdk`。同一工位串行执行，完成后自动发布简报。
+- **主管分派**：`@主管 <工作>` 或网页分派表单 → 自动建任务 → 挑选成员（用户指定优先，否则优先空闲托管成员）→ @ 送达并跟踪。
 
 ## MCP 工具一览
 
-`register_agent`、`read_inbox`、`send_message`、`get_context`、`claim_task`、
-`update_task`、`publish_brief`。
+`register_agent` · `read_inbox` · `send_message` · `get_context` · `create_task` · `claim_task` · `update_task` · `publish_brief`
 
 ## 安全边界
 
 - Hub 只监听 `127.0.0.1`，无鉴权；请勿改成对外监听。
-- Codex 托管工位默认只读沙箱；需要写文件时在创建工位时选择"可写工作区"。
-- 所有被修改的配置（`.cursor/mcp.json`、`.cursor/hooks.json`、`AGENTS.md`、
-  `~/.codex/config.toml`）在安装/卸载时都会生成 `.bak-时间戳` 备份。
+- Codex / Claude 托管工位默认只读沙箱；需要写文件时在创建工位时选择"可写工作区"。
+- 所有被修改的配置在安装/卸载时都会生成 `.bak-时间戳` 备份。
 
 ## 卸载
 
-```powershell
-node apps/hub/dist/setup/install.js uninstall --workspace D:\字字动画
+```bash
+node apps/hub/dist/setup/install.js uninstall --workspace <你的项目路径>
 ```
 
-## 测试
+## 开发
 
-```powershell
-pnpm -r test
+```bash
+pnpm -r test    # 单元/集成测试（vitest）
+pnpm -r build   # protocol → hub → web
+pnpm dev        # hub 开发模式
 ```
+
+## License
+
+[MIT](./LICENSE)
