@@ -7,7 +7,7 @@ import {
 } from "react";
 import { AGENT_KIND_LABELS, SUPERVISOR_NAME } from "@agent-office/protocol";
 import type { AgentCard, AgentMeta, OfficeBrief, OfficeTask } from "@agent-office/protocol";
-import { api, type Health, type OfficeState } from "./api";
+import { api, type Health, type OfficeState, type TerminalPane } from "./api";
 
 const STATUS_LABELS: Record<string, string> = {
   online: "在席",
@@ -50,8 +50,6 @@ const EVENT_ICONS: Record<string, string> = {
   "inbox-read": "✓",
 };
 
-const USER_NAME = "老板";
-
 function timeAgo(ts: number): string {
   const diff = Date.now() - ts;
   if (diff < 60_000) return "刚刚";
@@ -62,6 +60,12 @@ function timeAgo(ts: number): string {
 
 function clockTime(ts: number): string {
   return new Date(ts).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+}
+
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
 }
 
 function highlightMentions(text: string): React.ReactNode[] {
@@ -87,11 +91,38 @@ function avatarText(name: string): string {
   return /[\u4e00-\u9fff]/.test(last) ? last.slice(0, 1) : last.slice(0, 2).toUpperCase();
 }
 
-function Avatar({ name, kind, status }: { name: string; kind: string; status?: string }) {
+function Avatar({ agent, status }: { agent: Pick<AgentCard, "name" | "kind" | "meta">; status?: string }) {
+  const svg = (agent.meta as AgentMeta).avatarSvg;
   return (
-    <span className={`avatar kind-${kind} ${status ? `st-${status}` : ""}`} aria-hidden>
-      {avatarText(name)}
+    <span className={`avatar kind-${agent.kind} ${status ? `st-${status}` : ""}`} aria-hidden>
+      {svg ? <span className="avatar-art" dangerouslySetInnerHTML={{ __html: svg }} /> : avatarText(agent.name)}
     </span>
+  );
+}
+
+// ---------- 老板称呼 ----------
+
+function BossNameControl({ boss, onChanged }: { boss: AgentCard | undefined; onChanged: () => void }) {
+  const [error, setError] = useState("");
+  if (!boss) return null;
+  const rename = async () => {
+    const name = window.prompt("设置老板在办公室中的称呼", boss.name)?.trim();
+    if (!name || name === boss.name) return;
+    try {
+      await api.updateAgent(boss.id, { name });
+      setError("");
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+  return (
+    <div className="boss-control">
+      <button className="ghost-btn" title="修改老板称呼" onClick={() => void rename()}>
+        老板：{boss.name} · 修改称呼
+      </button>
+      {error && <span className="boss-error">{error}</span>}
+    </div>
   );
 }
 
@@ -109,11 +140,13 @@ function AgentBadge({
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(agent.name);
   const [model, setModel] = useState(meta(agent).model ?? "");
+  const [title, setTitle] = useState(meta(agent).title ?? "");
   const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
 
   const save = async () => {
     try {
-      await api.updateAgent(agent.id, { name: name.trim(), model });
+      await api.updateAgent(agent.id, { name: name.trim(), model, title });
       setEditing(false);
       setError("");
       onChanged();
@@ -122,12 +155,37 @@ function AgentBadge({
     }
   };
 
+  const makeAvatar = async () => {
+    setBusy(true);
+    try {
+      await api.generateAvatar(agent.id, title || undefined);
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    if (!window.confirm(`确定移出员工「${agent.name}」吗？历史消息会保留，但该员工的会话、收件箱和终端记录将清除。`)) return;
+    setBusy(true);
+    try {
+      await api.deleteAgent(agent.id);
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const m = meta(agent);
   const inboxOnly = agent.kind === "cursor-ide" || agent.kind === "codex-cli" || agent.kind === "claude-cli";
   return (
     <div className={`badge status-${agent.status}`}>
       <div className="badge-top">
-        <Avatar name={agent.name} kind={agent.kind} status={agent.status} />
+        <Avatar agent={agent} status={agent.status} />
         <div className="badge-id">
           {editing ? (
             <input
@@ -167,6 +225,8 @@ function AgentBadge({
         </div>
       )}
 
+      {!editing && m.title && <div className="badge-title">职位：{m.title}</div>}
+
       {editing && (
         <div className="badge-edit">
           <input
@@ -175,6 +235,14 @@ function AgentBadge({
             onChange={(e) => setModel(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && void save()}
           />
+          {agent.kind !== "user" && (
+            <input
+              placeholder="职位（如 测试 / git 库管理）"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && void save()}
+            />
+          )}
           {error && <div className="form-error">{error}</div>}
           <div className="form-actions">
             <button className="primary-btn sm" onClick={() => void save()}>
@@ -199,22 +267,40 @@ function AgentBadge({
         </div>
       )}
 
+      {agent.kind !== "user" && agent.kind !== "supervisor" && (
+        <div className="badge-stats">
+          <span title="今日已用 token（仅托管执行可统计）">
+            今日 {formatTokens(agent.todayTokens ?? 0)} tok
+          </span>
+          <span title="已完成任务数">完成 {agent.doneTasks ?? 0} 单</span>
+        </div>
+      )}
+
       <div className="badge-footer">
         <span className="badge-seen">
           {STATUS_LABELS[agent.status]} · {agent.lastSeenAt ? timeAgo(agent.lastSeenAt) : "—"}
         </span>
         <span className="badge-actions">
+          <button
+            className="icon-btn"
+            title={agent.kind === "user" ? "设置老板称呼" : "调整员工资料"}
+            onClick={() => {
+              setEditing((v) => !v);
+              setName(agent.name);
+              setModel(m.model ?? "");
+              setTitle(m.title ?? "");
+            }}
+          >
+            ✎
+          </button>
           {agent.kind !== "user" && agent.kind !== "supervisor" && (
-            <button
-              className="icon-btn"
-              title="改名 / 设置模型"
-              onClick={() => {
-                setEditing((v) => !v);
-                setName(agent.name);
-                setModel(m.model ?? "");
-              }}
-            >
-              ✎
+            <button className="icon-btn" title="生成员工头像" disabled={busy} onClick={() => void makeAvatar()}>
+              ◉
+            </button>
+          )}
+          {agent.kind !== "user" && agent.kind !== "supervisor" && (
+            <button className="icon-btn danger" title="移出员工" disabled={busy} onClick={() => void remove()}>
+              ×
             </button>
           )}
           {agent.kind !== "user" && (
@@ -816,7 +902,7 @@ function LiveBoard({ state }: { state: OfficeState }) {
           return (
             <article key={agent.id} className={`live-card status-${agent.status}`}>
               <header>
-                <Avatar name={agent.name} kind={agent.kind} status={agent.status} />
+                <Avatar agent={agent} status={agent.status} />
                 <div className="live-id">
                   <strong>{agent.name}</strong>
                   <span className="live-kind">
@@ -874,6 +960,62 @@ function LiveBoard({ state }: { state: OfficeState }) {
   );
 }
 
+// ---------- 终端管理 ----------
+
+function TerminalBoard({ refreshKey }: { refreshKey: number }) {
+  const [agents, setAgents] = useState<TerminalPane[]>([]);
+  const [selected, setSelected] = useState<string>("");
+  const [error, setError] = useState("");
+
+  const load = useCallback(() => {
+    api.terminals().then(({ agents: panes }) => {
+      setAgents(panes);
+      setSelected((current) => (panes.some((pane) => pane.id === current) ? current : (panes[0]?.id ?? "")));
+      setError("");
+    }).catch((e) => setError(e instanceof Error ? e.message : String(e)));
+  }, []);
+
+  useEffect(() => {
+    load();
+    const timer = window.setInterval(load, 1500);
+    return () => window.clearInterval(timer);
+  }, [load, refreshKey]);
+
+  const current = agents.find((pane) => pane.id === selected);
+  return (
+    <div className="terminal-wrap">
+      <aside className="terminal-list">
+        <div className="terminal-list-head">
+          <strong>托管终端</strong>
+          <button className="icon-btn" title="刷新终端" onClick={load}>↻</button>
+        </div>
+        {agents.length === 0 && <p className="empty">暂无托管工位。创建托管 Agent 后，终端输出会实时出现在这里。</p>}
+        {agents.map((pane) => (
+          <button key={pane.id} className={`terminal-agent ${pane.id === selected ? "active" : ""}`} onClick={() => setSelected(pane.id)}>
+            <span><b>{pane.name}</b><small>{AGENT_KIND_LABELS[pane.kind as keyof typeof AGENT_KIND_LABELS] ?? pane.kind}</small></span>
+            <em className={`term-status ${pane.status}`}>{STATUS_LABELS[pane.status] ?? pane.status}</em>
+          </button>
+        ))}
+      </aside>
+      <section className="terminal-screen">
+        <header>
+          <div>
+            <strong>{current?.name ?? "选择一个托管工位"}</strong>
+            {current && <span>{current.lines.length} 条实时输出</span>}
+          </div>
+          {current?.status === "busy" && <button className="danger-btn" onClick={() => api.stopAgent(current.id).then(load).catch((e) => setError(e.message))}>终止执行</button>}
+        </header>
+        {error && <p className="form-error">{error}</p>}
+        <div className="terminal-output" role="log" aria-live="polite">
+          {!current && <p>从左侧选择员工查看终端。</p>}
+          {current && current.lines.length === 0 && <p>等待终端输出…</p>}
+          {current?.lines.map((line, index) => <div key={`${line.at}-${index}`} className={`term-line term-${line.kind}`}><time>{clockTime(line.at)}</time><code>{line.text}</code></div>)}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 // ---------- 动态流 ----------
 
 function Feed({ state }: { state: OfficeState }) {
@@ -881,10 +1023,15 @@ function Feed({ state }: { state: OfficeState }) {
   const atBottomRef = useRef(true);
   const [hasNew, setHasNew] = useState(false);
 
+  const bossName = useMemo(
+    () => state.agents.find((a) => a.kind === "user")?.name ?? "老板",
+    [state.agents],
+  );
+
   const items = useMemo(() => {
     const list: Array<{ key: string; at: number; node: React.ReactNode }> = [];
     for (const m of state.messages) {
-      const own = m.fromName === USER_NAME;
+      const own = m.fromName === bossName;
       const fromAgent = state.agents.find((a) => a.name === m.fromName);
       list.push({
         key: `m-${m.id}`,
@@ -892,7 +1039,7 @@ function Feed({ state }: { state: OfficeState }) {
         node: (
           <div className={`msg ${own ? "own" : ""} ${m.fromName === SUPERVISOR_NAME ? "from-supervisor" : ""}`}>
             {!own && (
-              <Avatar name={m.fromName} kind={fromAgent?.kind ?? "user"} />
+              <Avatar agent={fromAgent ?? { name: m.fromName, kind: "user", meta: {} }} />
             )}
             <div className="msg-body">
               <div className="msg-head">
@@ -935,7 +1082,7 @@ function Feed({ state }: { state: OfficeState }) {
       });
     }
     return list.sort((a, b) => a.at - b.at).slice(-150);
-  }, [state]);
+  }, [state, bossName]);
 
   // 智能滚动：贴底时跟随新消息；用户上翻时不打扰，改为「回到最新」提示
   useEffect(() => {
@@ -990,7 +1137,7 @@ export function App() {
   const [state, setState] = useState<OfficeState | null>(null);
   const [health, setHealth] = useState<Health | null>(null);
   const [mentionPrefill, setMentionPrefill] = useState("");
-  const [view, setView] = useState<"office" | "live">("office");
+  const [view, setView] = useState<"office" | "live" | "terminal">("office");
   const [onboardOpen, setOnboardOpen] = useState(false);
   const refreshTimer = useRef<number | null>(null);
 
@@ -1032,6 +1179,7 @@ export function App() {
     );
   }
 
+  const boss = state.agents.find((a) => a.kind === "user");
   const agents = state.agents.filter((a) => a.kind !== "user");
   const deskAgents = agents.filter((a) => a.kind !== "supervisor");
   const onlineCount = deskAgents.filter((a) => a.status !== "offline").length;
@@ -1074,6 +1222,14 @@ export function App() {
           >
             实时工作台
           </button>
+          <button
+            role="tab"
+            aria-selected={view === "terminal"}
+            className={view === "terminal" ? "active" : ""}
+            onClick={() => setView("terminal")}
+          >
+            终端管理
+          </button>
         </nav>
         <div className="topbar-right">
           <div className="health" aria-label="系统状态">
@@ -1087,6 +1243,7 @@ export function App() {
               </span>
             ))}
           </div>
+          <BossNameControl boss={boss} onChanged={refresh} />
           <button className="primary-btn onboard-btn" onClick={() => setOnboardOpen(true)}>
             ＋ 接入 Agent
           </button>
@@ -1096,6 +1253,10 @@ export function App() {
       {view === "live" ? (
         <main className="live-main">
           <LiveBoard state={state} />
+        </main>
+      ) : view === "terminal" ? (
+        <main className="terminal-main">
+          <TerminalBoard refreshKey={state.events.length} />
         </main>
       ) : (
         <main className="layout">

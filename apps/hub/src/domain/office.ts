@@ -7,6 +7,7 @@ import {
 } from "@agent-office/protocol";
 import type { OfficeBus } from "./bus.js";
 import type { OfficeStore } from "./store.js";
+import { TerminalLog } from "./terminal.js";
 import { truncate } from "../util.js";
 
 export type ManagedDispatcher = (
@@ -24,18 +25,27 @@ const MANAGED_KINDS = new Set(["codex-managed", "cursor-managed", "claude-manage
  */
 export class OfficeService {
   private managedDispatcher: ManagedDispatcher | null = null;
+  /** 正在运行的托管执行的终止函数（agentId → kill） */
+  private runKills = new Map<string, () => void>();
+  readonly terminals: TerminalLog;
 
   constructor(
     readonly store: OfficeStore,
     readonly bus: OfficeBus,
   ) {
-    // 确保人类用户与主管席位存在
-    if (!store.getAgentByName(USER_AGENT_NAME)) {
+    this.terminals = new TerminalLog(bus);
+    // 确保人类用户与主管席位存在（boss 可能已改过称呼，按 kind 判断）
+    if (!store.listAgents().some((a) => a.kind === "user")) {
       store.registerAgent({ name: USER_AGENT_NAME, kind: "user", status: "online" });
     }
     if (!store.getAgentByName(SUPERVISOR_NAME)) {
       store.registerAgent({ name: SUPERVISOR_NAME, kind: "supervisor", status: "online" });
     }
+  }
+
+  /** boss（人类用户）的当前称呼 */
+  bossName(): string {
+    return this.store.listAgents().find((a) => a.kind === "user")?.name ?? USER_AGENT_NAME;
   }
 
   setManagedDispatcher(dispatcher: ManagedDispatcher): void {
@@ -244,7 +254,10 @@ export class OfficeService {
 
   // ---------- Agent 管理 ----------
 
-  renameAgent(agentId: string, patch: { name?: string; model?: string }): AgentCard | null {
+  renameAgent(
+    agentId: string,
+    patch: { name?: string; model?: string; title?: string },
+  ): AgentCard | null {
     const agent = this.store.getAgentById(agentId);
     if (!agent) return null;
     if (patch.name && patch.name.trim() && patch.name.trim() !== agent.name) {
@@ -253,14 +266,73 @@ export class OfficeService {
       this.event({
         type: "rename",
         agentId,
-        text: `「${agent.name}」改名为「${patch.name.trim()}」`,
+        text:
+          agent.kind === "user"
+            ? `boss 的称呼改为「${patch.name.trim()}」`
+            : `「${agent.name}」改名为「${patch.name.trim()}」`,
       });
     }
     if (patch.model !== undefined) {
       this.store.updateAgentMeta(agentId, { model: patch.model.trim() || undefined });
     }
+    if (patch.title !== undefined) {
+      this.store.updateAgentMeta(agentId, { title: patch.title.trim() || undefined });
+    }
     this.emit("agent", { agentId });
     return this.store.getAgentById(agentId);
+  }
+
+  /** 删除员工：boss 与主管不可删；正在执行的先终止 */
+  deleteAgent(agentId: string): { ok: boolean; error?: string } {
+    const agent = this.store.getAgentById(agentId);
+    if (!agent) return { ok: false, error: "成员不存在" };
+    if (agent.kind === "user" || agent.kind === "supervisor") {
+      return { ok: false, error: "boss 与主管席位不可删除" };
+    }
+    this.stopRun(agentId);
+    this.terminals.clear(agentId);
+    this.store.deleteAgent(agentId);
+    this.event({ type: "leave", text: `「${agent.name}」已被移出办公室` });
+    this.emit("agent", { agentId });
+    return { ok: true };
+  }
+
+  /** 员工回复入群：只播报不再触发 @ 路由，避免托管互相唤醒形成循环 */
+  postReply(agentId: string, text: string, taskId?: string | null): string | null {
+    const agent = this.store.getAgentById(agentId);
+    if (!agent) return null;
+    const messageId = this.store.createMessage({
+      fromAgentId: agent.id,
+      text,
+      mentionAgentIds: [],
+      taskId: taskId ?? null,
+    });
+    this.emit("message", { messageId });
+    return messageId;
+  }
+
+  // ---------- 托管运行控制 ----------
+
+  registerRunKill(agentId: string, kill: () => void): void {
+    this.runKills.set(agentId, kill);
+  }
+
+  clearRunKill(agentId: string): void {
+    this.runKills.delete(agentId);
+  }
+
+  /** 终止某员工当前的托管执行；无运行时返回 false */
+  stopRun(agentId: string): boolean {
+    const kill = this.runKills.get(agentId);
+    if (!kill) return false;
+    this.runKills.delete(agentId);
+    try {
+      kill();
+    } catch {
+      /* 进程可能已退出 */
+    }
+    this.event({ type: "stop", agentId, text: "boss 终止了当前执行" });
+    return true;
   }
 
   /** 记录实时活动（不落 events 表，避免刷屏；经 SSE 推送） */

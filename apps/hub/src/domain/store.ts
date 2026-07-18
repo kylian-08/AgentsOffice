@@ -79,6 +79,12 @@ CREATE TABLE IF NOT EXISTS events(
   payload TEXT,
   created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS token_usage(
+  agent_id TEXT NOT NULL,
+  day TEXT NOT NULL,
+  tokens INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(agent_id, day)
+);
 CREATE INDEX IF NOT EXISTS idx_deliveries_to ON deliveries(to_agent_id, status);
 CREATE INDEX IF NOT EXISTS idx_briefs_created ON briefs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at DESC);
@@ -94,6 +100,11 @@ interface AgentRow {
   meta: string;
   last_seen_at: number | null;
   created_at: number;
+}
+
+/** 本地时区的 YYYY-MM-DD，作为 token 日结键 */
+function dayKey(): string {
+  return new Date().toLocaleDateString("sv");
 }
 
 function rowToAgent(row: AgentRow): AgentCard {
@@ -117,6 +128,12 @@ export class OfficeStore {
     this.db = new DatabaseSync(dbPath);
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec(SCHEMA);
+    // 旧库迁移：消息记录发件人名字快照，员工删除后历史仍可读
+    try {
+      this.db.exec("ALTER TABLE messages ADD COLUMN from_name TEXT");
+    } catch {
+      /* 列已存在 */
+    }
   }
 
   close(): void {
@@ -193,8 +210,52 @@ export class OfficeStore {
       )
       .all() as unknown as Array<{ agentId: string; cnt: number }>;
     const map = new Map(pending.map((p) => [p.agentId, p.cnt]));
-    for (const agent of agents) agent.pendingCount = map.get(agent.id) ?? 0;
+    const tokens = this.db
+      .prepare("SELECT agent_id AS agentId, tokens FROM token_usage WHERE day = ?")
+      .all(dayKey()) as unknown as Array<{ agentId: string; tokens: number }>;
+    const tokenMap = new Map(tokens.map((t) => [t.agentId, t.tokens]));
+    const done = this.db
+      .prepare(
+        `SELECT assignee_agent_id AS agentId, COUNT(*) AS cnt FROM tasks
+         WHERE status = 'done' AND assignee_agent_id IS NOT NULL GROUP BY assignee_agent_id`,
+      )
+      .all() as unknown as Array<{ agentId: string; cnt: number }>;
+    const doneMap = new Map(done.map((d) => [d.agentId, d.cnt]));
+    for (const agent of agents) {
+      agent.pendingCount = map.get(agent.id) ?? 0;
+      agent.todayTokens = tokenMap.get(agent.id) ?? 0;
+      agent.doneTasks = doneMap.get(agent.id) ?? 0;
+    }
     return agents;
+  }
+
+  /** 累计今日 token 用量（托管执行结束时调用） */
+  addTokens(agentId: string, tokens: number): void {
+    if (!Number.isFinite(tokens) || tokens <= 0) return;
+    this.db
+      .prepare(
+        `INSERT INTO token_usage(agent_id, day, tokens) VALUES (?, ?, ?)
+         ON CONFLICT(agent_id, day) DO UPDATE SET tokens = tokens + excluded.tokens`,
+      )
+      .run(agentId, dayKey(), Math.round(tokens));
+  }
+
+  todayTokens(agentId: string): number {
+    const row = this.db
+      .prepare("SELECT tokens FROM token_usage WHERE agent_id = ? AND day = ?")
+      .get(agentId, dayKey()) as { tokens: number } | undefined;
+    return row?.tokens ?? 0;
+  }
+
+  /** 删除员工：清收件箱/会话/用量；历史消息与简报保留（靠名字快照） */
+  deleteAgent(agentId: string): boolean {
+    const agent = this.getAgentById(agentId);
+    if (!agent) return false;
+    this.db.prepare("DELETE FROM deliveries WHERE to_agent_id = ?").run(agentId);
+    this.db.prepare("DELETE FROM sessions WHERE agent_id = ?").run(agentId);
+    this.db.prepare("DELETE FROM token_usage WHERE agent_id = ?").run(agentId);
+    this.db.prepare("DELETE FROM agents WHERE id = ?").run(agentId);
+    return true;
   }
 
   setAgentStatus(agentId: string, status: AgentStatus): void {
@@ -269,14 +330,18 @@ export class OfficeStore {
     taskId?: string | null;
   }): string {
     const id = uuid();
+    const fromName = input.fromAgentId
+      ? (this.getAgentById(input.fromAgentId)?.name ?? null)
+      : null;
     this.db
       .prepare(
-        `INSERT INTO messages(id, from_agent_id, text, mentions, task_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO messages(id, from_agent_id, from_name, text, mentions, task_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
         input.fromAgentId,
+        fromName,
         input.text,
         JSON.stringify(input.mentionAgentIds),
         input.taskId ?? null,
@@ -292,7 +357,8 @@ export class OfficeStore {
   listMessages(limit = 100): OfficeMessage[] {
     const rows = this.db
       .prepare(
-        `SELECT m.*, a.name AS from_name FROM messages m
+        `SELECT m.id, m.from_agent_id, m.text, m.mentions, m.task_id, m.created_at,
+                COALESCE(a.name, m.from_name) AS from_name FROM messages m
          LEFT JOIN agents a ON a.id = m.from_agent_id
          ORDER BY m.created_at DESC LIMIT ?`,
       )
@@ -334,7 +400,7 @@ export class OfficeStore {
     return (
       this.db
         .prepare(
-          `SELECT m.id AS messageId, COALESCE(a.name, '系统') AS fromName,
+          `SELECT m.id AS messageId, COALESCE(a.name, m.from_name, '系统') AS fromName,
                   m.text, m.task_id AS taskId, m.created_at AS createdAt
            FROM deliveries d
            JOIN messages m ON m.id = d.message_id
@@ -508,8 +574,8 @@ export class OfficeStore {
   getBrief(id: string): OfficeBrief | null {
     const row = this.db
       .prepare(
-        `SELECT b.*, a.name AS agent_name FROM briefs b
-         JOIN agents a ON a.id = b.agent_id WHERE b.id = ?`,
+        `SELECT b.*, COALESCE(a.name, '已离职成员') AS agent_name FROM briefs b
+         LEFT JOIN agents a ON a.id = b.agent_id WHERE b.id = ?`,
       )
       .get(id) as Record<string, unknown> | undefined;
     return row ? this.briefFromRow(row) : null;
@@ -518,8 +584,8 @@ export class OfficeStore {
   listBriefs(limit = 50): OfficeBrief[] {
     const rows = this.db
       .prepare(
-        `SELECT b.*, a.name AS agent_name FROM briefs b
-         JOIN agents a ON a.id = b.agent_id
+        `SELECT b.*, COALESCE(a.name, '已离职成员') AS agent_name FROM briefs b
+         LEFT JOIN agents a ON a.id = b.agent_id
          ORDER BY b.created_at DESC LIMIT ?`,
       )
       .all(limit) as unknown as Array<Record<string, unknown>>;

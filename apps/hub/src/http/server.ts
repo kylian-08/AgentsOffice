@@ -5,8 +5,8 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { OfficeConfig } from "../config.js";
+import { generateAvatar } from "../domain/avatar.js";
 import type { OfficeService } from "../domain/office.js";
-import { USER_AGENT_NAME } from "../domain/office.js";
 import {
   handleClaudeHook,
   handleCodexNotify,
@@ -80,7 +80,7 @@ export async function createServer(
     const body = (request.body ?? {}) as { text?: string; from?: string };
     if (!body.text?.trim()) return reply.code(400).send({ error: "text 不能为空" });
     const result = office.sendMessage({
-      fromName: body.from?.trim() || USER_AGENT_NAME,
+      fromName: body.from?.trim() || office.bossName(),
       text: body.text.trim(),
     });
     return result;
@@ -96,7 +96,7 @@ export async function createServer(
     return office.createTask({
       title: body.title.trim(),
       description: body.description ?? null,
-      createdBy: USER_AGENT_NAME,
+      createdBy: office.bossName(),
       assigneeName: body.assignee ?? null,
     });
   });
@@ -108,7 +108,7 @@ export async function createServer(
       taskId: id,
       status: body.status,
       assigneeName: body.assignee,
-      byAgentName: USER_AGENT_NAME,
+      byAgentName: office.bossName(),
     });
     if (!task) return reply.code(404).send({ error: "任务不存在" });
     return task;
@@ -152,10 +152,57 @@ export async function createServer(
 
   app.patch("/api/agents/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
-    const body = (request.body ?? {}) as { name?: string; model?: string };
+    const body = (request.body ?? {}) as { name?: string; model?: string; title?: string };
     const agent = office.renameAgent(id, body);
     if (!agent) return reply.code(409).send({ error: "改名失败：Agent 不存在或工号已被占用" });
     return agent;
+  });
+
+  app.delete("/api/agents/:id", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const result = office.deleteAgent(id);
+    if (!result.ok) return reply.code(400).send({ error: result.error });
+    return { ok: true };
+  });
+
+  app.post("/api/agents/:id/stop", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const agent = office.store.getAgentById(id);
+    if (!agent) return reply.code(404).send({ error: "成员不存在" });
+    const stopped = office.stopRun(id);
+    if (!stopped) return reply.code(409).send({ error: "该成员当前没有可终止的执行" });
+    return { ok: true };
+  });
+
+  app.post("/api/agents/:id/avatar", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const agent = office.store.getAgentById(id);
+    if (!agent) return reply.code(404).send({ error: "成员不存在" });
+    const body = (request.body ?? {}) as { style?: string };
+    const { svg, source } = await generateAvatar(agent, body.style?.trim() || undefined);
+    office.store.updateAgentMeta(id, { avatarSvg: svg });
+    office.event({
+      type: "rename",
+      agentId: id,
+      text: source === "codex" ? "codex 为其生成了新头像" : "生成了本地几何头像",
+    });
+    office.bus.publish({ type: "agent", payload: { agentId: id } });
+    return { ok: true, source, agent: office.store.getAgentById(id) };
+  });
+
+  app.get("/api/terminals", async () => {
+    const agents = office.store
+      .listAgents()
+      .filter((a) => a.kind.endsWith("-managed"));
+    return {
+      agents: agents.map((a) => ({
+        id: a.id,
+        name: a.name,
+        kind: a.kind,
+        status: a.status,
+        lines: office.terminals.get(a.id),
+      })),
+    };
   });
 
   app.post("/api/dispatch", async (request, reply) => {
@@ -170,7 +217,7 @@ export async function createServer(
       description: body.description?.trim() || null,
       agentNames: body.agents?.filter((a) => a?.trim()),
       auto: !body.agents || body.agents.length === 0,
-      requestedBy: USER_AGENT_NAME,
+      requestedBy: office.bossName(),
     });
     if (!result) return reply.code(409).send({ error: "没有可分派的在线成员" });
     return result;

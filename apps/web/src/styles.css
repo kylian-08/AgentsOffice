@@ -1594,3 +1594,195 @@ button:focus-visible {
     min-width: 0;
   }
 }
+
+
+/* ---------- 员工资料与终端管理 ---------- */
+.avatar-art {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border-radius: inherit;
+}
+
+.avatar-art svg {
+  width: 100%;
+  height: 100%;
+}
+
+.badge-title {
+  margin-top: 5px;
+  color: var(--ink-2);
+  font-size: 11.5px;
+}
+
+.badge-stats {
+  display: flex;
+  gap: 10px;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.badge-stats span {
+  background: var(--card);
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  padding: 2px 7px;
+}
+
+.icon-btn.danger {
+  color: var(--accent);
+}
+
+.terminal-main {
+  flex: 1;
+  min-height: 0;
+  padding: 16px 20px;
+}
+
+.terminal-wrap {
+  height: 100%;
+  min-height: 480px;
+  display: grid;
+  grid-template-columns: 270px minmax(0, 1fr);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.terminal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  overflow-y: auto;
+  border-right: 1px solid var(--line);
+  background: #f7f9fb;
+}
+
+.terminal-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0 2px 6px;
+  color: var(--ink-2);
+  font-size: 13px;
+}
+
+.terminal-agent {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  text-align: left;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  padding: 9px 10px;
+  color: var(--ink-2);
+}
+
+.terminal-agent:hover,
+.terminal-agent.active {
+  border-color: var(--line);
+  background: var(--panel);
+}
+
+.terminal-agent.active {
+  border-left: 3px solid var(--accent);
+  padding-left: 8px;
+}
+
+.terminal-agent span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.terminal-agent b,
+.terminal-agent small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-agent b { font-size: 13px; }
+.terminal-agent small { color: var(--muted); font-size: 11px; }
+.term-status { font-size: 11px; font-style: normal; color: var(--faint); }
+.term-status.busy { color: var(--busy); }
+.term-status.online { color: var(--ok); }
+
+.terminal-screen {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: #121a22;
+  color: #d9e2ea;
+}
+
+.terminal-screen header {
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 14px;
+  border-bottom: 1px solid #2a3642;
+  background: #17212b;
+}
+
+.terminal-screen header div { display: flex; flex-direction: column; }
+.terminal-screen header strong { font-size: 13px; }
+.terminal-screen header span { color: #92a1af; font-size: 11px; }
+
+.danger-btn {
+  border: 1px solid rgba(244, 112, 102, 0.7);
+  border-radius: 6px;
+  padding: 4px 10px;
+  color: #ffb5ad;
+  background: rgba(199, 64, 45, 0.16);
+  font-size: 12px;
+}
+
+.terminal-output {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 14px;
+  font: 12px/1.65 Consolas, "Cascadia Code", monospace;
+}
+
+.terminal-output p { color: #92a1af; }
+.term-line { display: flex; gap: 10px; white-space: pre-wrap; word-break: break-word; }
+.term-line time { flex: none; color: #697a89; font-size: 10px; }
+.term-line code { color: inherit; font: inherit; }
+.term-cmd code { color: #8ad5ff; }
+.term-error code { color: #ff9b91; }
+.term-final code { color: #95e7b5; }
+.term-info code { color: #eac77f; }
+
+@media (max-width: 760px) {
+  .terminal-main { padding: 10px; }
+  .terminal-wrap { grid-template-columns: 1fr; min-height: 0; }
+  .terminal-list { max-height: 180px; border-right: none; border-bottom: 1px solid var(--line); }
+}
+
+
+.boss-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.boss-error {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--accent);
+  font-size: 11px;
+}

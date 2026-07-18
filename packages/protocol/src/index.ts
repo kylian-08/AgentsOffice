@@ -25,6 +25,10 @@ export interface AgentCard {
   lastSeenAt: number | null;
   createdAt: number;
   pendingCount?: number;
+  /** 今日已用 token（仅托管执行可统计） */
+  todayTokens?: number;
+  /** 已完成任务数 */
+  doneTasks?: number;
 }
 
 export interface OfficeMessage {
@@ -106,6 +110,10 @@ export interface AgentMeta {
   /** 当前正在做的事（实时工作台展示） */
   lastActivity?: string;
   lastActivityAt?: number;
+  /** 职位（如 测试 / git 库管理） */
+  title?: string;
+  /** 头像 SVG（codex 生成或本地几何头像） */
+  avatarSvg?: string;
   threadId?: string;
   sessionId?: string;
   cursorAgentId?: string;

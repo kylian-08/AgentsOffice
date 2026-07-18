@@ -37,6 +37,8 @@ export function runCli(
     timeoutMs?: number;
     stdinData?: string;
     onLine?: (line: string) => void;
+    /** 注册终止函数，调用方可随时杀掉整个进程树 */
+    registerKill?: (kill: () => void) => void;
   } = {},
 ): Promise<CliResult> {
   return new Promise((resolve) => {
@@ -55,10 +57,21 @@ export function runCli(
     let timedOut = false;
     let settled = false;
 
+    // Windows 下 shell:true 只杀 cmd 壳，须 taskkill /T 连根拔进程树
+    const killTree = () => {
+      if (settled) return;
+      if (isWindows && child.pid) {
+        spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true });
+      } else {
+        child.kill("SIGTERM");
+      }
+    };
+    opts.registerKill?.(killTree);
+
     const timer = opts.timeoutMs
       ? setTimeout(() => {
           timedOut = true;
-          child.kill();
+          killTree();
         }, opts.timeoutMs)
       : null;
 

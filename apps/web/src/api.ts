@@ -14,6 +14,20 @@ export interface OfficeState {
   events: OfficeEvent[];
 }
 
+export interface TermLine {
+  at: number;
+  kind: "cmd" | "out" | "info" | "error" | "final";
+  text: string;
+}
+
+export interface TerminalPane {
+  id: string;
+  name: string;
+  kind: string;
+  status: string;
+  lines: TermLine[];
+}
+
 export interface Health {
   ok: boolean;
   port: number;
@@ -64,12 +78,24 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(input),
     }).then((r) => json<AgentCard>(r)),
-  updateAgent: (id: string, patch: { name?: string; model?: string }) =>
+  updateAgent: (id: string, patch: { name?: string; model?: string; title?: string }) =>
     fetch(`/api/agents/${id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(patch),
     }).then((r) => json<AgentCard>(r)),
+  deleteAgent: (id: string) =>
+    fetch(`/api/agents/${id}`, { method: "DELETE" }).then((r) => json<{ ok: boolean }>(r)),
+  stopAgent: (id: string) =>
+    fetch(`/api/agents/${id}/stop`, { method: "POST" }).then((r) => json<{ ok: boolean }>(r)),
+  generateAvatar: (id: string, style?: string) =>
+    fetch(`/api/agents/${id}/avatar`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ style }),
+    }).then((r) => json<{ ok: boolean; source: "codex" | "identicon" }>(r)),
+  terminals: () =>
+    fetch("/api/terminals").then((r) => json<{ agents: TerminalPane[] }>(r)),
   dispatch: (input: { title: string; description?: string; agents?: string[] }) =>
     fetch("/api/dispatch", {
       method: "POST",
