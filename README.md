@@ -34,7 +34,10 @@
 pnpm install
 pnpm build
 
-# 接入你的工作区（自动备份所有被修改的配置文件）
+# 用户级接入（Cursor / Codex / Claude 在任意目录启动都自动入驻）
+node apps/hub/dist/setup/install.js install
+
+# 可选：把某个目录标记为「办公室工作区」，额外写入可随仓库共享的项目级文件
 node apps/hub/dist/setup/install.js install --workspace <你的项目路径>
 
 # 启动中枢（Windows 也可双击 启动办公室.bat）
@@ -43,19 +46,29 @@ pnpm start
 
 打开 http://127.0.0.1:4517 即可看到办公室。重启 Cursor 会话 / Codex 终端 / Claude Code 会话后自动入驻。
 
-安装器会以幂等方式合并以下配置（每个文件都会先生成 `.bak-时间戳` 备份）：
+安装器会以幂等方式合并以下配置（每个文件都会先生成 `.bak-时间戳` 备份）。
+
+用户级（默认安装，任意目录生效）：
 
 | 文件 | 用途 |
 | --- | --- |
-| `<workspace>/.cursor/mcp.json` | Cursor 接入办公室 MCP |
-| `<workspace>/.cursor/hooks.json` | Cursor 会话自动登记 / 活动上报 / 兜底简报 |
+| `~/.cursor/mcp.json` | Cursor 全局接入办公室 MCP |
+| `~/.cursor/hooks.json` | Cursor 会话自动登记 / 活动上报 / 兜底简报 |
+| `~/.codex/config.toml` | Codex MCP + notify 回帧 |
+| `~/.codex/AGENTS.md` | Codex 全局协作协议块 |
+| `~/.claude/settings.json` | Claude Code hooks |
+| Claude 用户级 MCP | 自动执行 `claude mcp add --scope user agent-office`（CLI 不存在时给出手工命令） |
+
+工作区级（`--workspace` 可选，用于团队共享/仓库内声明）：
+
+| 文件 | 用途 |
+| --- | --- |
 | `<workspace>/.cursor/rules/agent-office.mdc` | Cursor 协作规则 |
 | `<workspace>/AGENTS.md` | Codex 协作协议块 |
-| `~/.codex/config.toml` | Codex MCP + notify 回帧 |
-| `~/.claude/settings.json` | Claude Code hooks（用户级，任意目录启动都生效） |
-| Claude 用户级 MCP | 自动执行 `claude mcp add --scope user agent-office`（CLI 不存在时给出手工命令） |
-| `<workspace>/.mcp.json` | Claude Code 项目级 MCP（团队共享用） |
+| `<workspace>/.mcp.json` | Claude Code 项目级 MCP |
 | `<workspace>/CLAUDE.md` | Claude Code 协作协议块 |
+
+> 从旧版本升级时，`install --workspace` 会自动清理以前写在工作区的 `.cursor/mcp.json`、`.cursor/hooks.json` 条目，避免 hooks 重复触发。
 
 ## 工作原理
 

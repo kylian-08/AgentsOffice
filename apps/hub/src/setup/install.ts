@@ -75,30 +75,46 @@ const CLAUDE_MD_BLOCK = `## Agent Office 协作协议（Claude Code）
 - 每轮开始前调用 \`read_inbox\` 查看 @你 的消息；完成阶段性工作后调用 \`publish_brief\` 发布简报。
 - 需要其他成员（含 Cursor/Codex 中的 Agent）协助时，用 \`send_message\` 并 @对方工号；\`get_context\` 可查花名册与最新简报。`;
 
-interface InstallPaths {
-  workspace: string;
+/** 用户级路径：三家客户端在任意目录启动都能自动入驻 */
+interface UserPaths {
   cursorMcp: string;
   cursorHooks: string;
-  cursorRule: string;
-  agentsMd: string;
   codexConfig: string;
+  codexAgentsMd: string;
   claudeSettings: string;
-  claudeMcp: string;
-  claudeMd: string;
 }
 
-function resolvePaths(workspace: string): InstallPaths {
+/** 工作区路径：可选的「办公室工作区」，写入可随仓库共享的项目级文件 */
+interface WorkspacePaths {
+  workspace: string;
+  cursorRule: string;
+  agentsMd: string;
+  claudeMcp: string;
+  claudeMd: string;
+  // 旧版本装在工作区的 Cursor 配置，卸载/升级时清理
+  legacyCursorMcp: string;
+  legacyCursorHooks: string;
+}
+
+function userPaths(): UserPaths {
+  return {
+    cursorMcp: join(homedir(), ".cursor", "mcp.json"),
+    cursorHooks: join(homedir(), ".cursor", "hooks.json"),
+    codexConfig: join(homedir(), ".codex", "config.toml"),
+    codexAgentsMd: join(homedir(), ".codex", "AGENTS.md"),
+    claudeSettings: join(homedir(), ".claude", "settings.json"),
+  };
+}
+
+function workspacePaths(workspace: string): WorkspacePaths {
   return {
     workspace,
-    cursorMcp: join(workspace, ".cursor", "mcp.json"),
-    cursorHooks: join(workspace, ".cursor", "hooks.json"),
     cursorRule: join(workspace, ".cursor", "rules", "agent-office.mdc"),
     agentsMd: join(workspace, "AGENTS.md"),
-    codexConfig: join(homedir(), ".codex", "config.toml"),
-    // Claude hooks 装到用户级：无论在哪个目录启动 claude 都能自动入驻
-    claudeSettings: join(homedir(), ".claude", "settings.json"),
     claudeMcp: join(workspace, ".mcp.json"),
     claudeMd: join(workspace, "CLAUDE.md"),
+    legacyCursorMcp: join(workspace, ".cursor", "mcp.json"),
+    legacyCursorHooks: join(workspace, ".cursor", "hooks.json"),
   };
 }
 
@@ -134,10 +150,18 @@ function removeClaudeUserMcp(): void {
   }
 }
 
-export function install(workspace: string): void {
+/** 备份后写入，返回备份路径（如有） */
+function backupAndWrite(path: string, content: string, backups: string[]): void {
+  const b = backup(path);
+  if (b) backups.push(b);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, content, "utf8");
+}
+
+export function install(workspace: string | null): void {
   const config = loadConfig();
   const mcpUrl = `http://127.0.0.1:${config.port}/mcp`;
-  const paths = resolvePaths(workspace);
+  const user = userPaths();
   const node = process.execPath;
   const cursorHookCmd = `"${node}" "${join(HOOKS_DIR, "cursor-hook.mjs")}"`;
   const codexNotifyCmd = [node, join(HOOKS_DIR, "codex-notify.mjs")];
@@ -145,84 +169,72 @@ export function install(workspace: string): void {
   const backups: string[] = [];
   const notes: string[] = [];
 
-  // 1. Cursor MCP
-  const mcpBackup = backup(paths.cursorMcp);
-  if (mcpBackup) backups.push(mcpBackup);
-  mkdirSync(dirname(paths.cursorMcp), { recursive: true });
-  writeFileSync(paths.cursorMcp, mergeMcpJson(readIfExists(paths.cursorMcp), mcpUrl), "utf8");
+  // ---------- 用户级：任意目录的会话都自动入驻 ----------
 
-  // 2. Cursor hooks
-  const hooksBackup = backup(paths.cursorHooks);
-  if (hooksBackup) backups.push(hooksBackup);
-  writeFileSync(
-    paths.cursorHooks,
-    mergeHooksJson(readIfExists(paths.cursorHooks), cursorHookCmd),
-    "utf8",
+  // 1. Cursor：全局 MCP + 全局 hooks（协作规则由 sessionStart hook 注入）
+  backupAndWrite(user.cursorMcp, mergeMcpJson(readIfExists(user.cursorMcp), mcpUrl), backups);
+  backupAndWrite(
+    user.cursorHooks,
+    mergeHooksJson(readIfExists(user.cursorHooks), cursorHookCmd),
+    backups,
   );
 
-  // 3. Cursor 规则
-  mkdirSync(dirname(paths.cursorRule), { recursive: true });
-  writeFileSync(paths.cursorRule, RULE_CONTENT, "utf8");
-
-  // 4. AGENTS.md 标记块
-  const agentsBackup = backup(paths.agentsMd);
-  if (agentsBackup) backups.push(agentsBackup);
-  writeFileSync(
-    paths.agentsMd,
-    upsertMarkerBlock(readIfExists(paths.agentsMd), AGENTS_MD_BLOCK),
-    "utf8",
-  );
-
-  // 5. Codex config.toml
-  const codexBackup = backup(paths.codexConfig);
+  // 2. Codex：全局 config.toml（MCP + notify）+ 全局 AGENTS.md 协作协议
+  const codexBackup = backup(user.codexConfig);
   if (codexBackup) backups.push(codexBackup);
-  mkdirSync(dirname(paths.codexConfig), { recursive: true });
-  const merged = mergeCodexToml(readIfExists(paths.codexConfig), {
+  mkdirSync(dirname(user.codexConfig), { recursive: true });
+  const merged = mergeCodexToml(readIfExists(user.codexConfig), {
     mcpUrl,
     notifyCommand: codexNotifyCmd,
   });
-  writeFileSync(paths.codexConfig, merged.toml, "utf8");
+  writeFileSync(user.codexConfig, merged.toml, "utf8");
   if (merged.notifySkipped) {
     notes.push(
       "~/.codex/config.toml 已存在其他 notify 配置，未覆盖；如需回帧简报请手工把 codex-notify.mjs 加入 notify。",
     );
   }
+  backupAndWrite(
+    user.codexAgentsMd,
+    upsertMarkerBlock(readIfExists(user.codexAgentsMd), AGENTS_MD_BLOCK),
+    backups,
+  );
 
-  // 6. Claude Code：用户级 hooks + 用户级 MCP + 项目级 .mcp.json / CLAUDE.md
-  const claudeSettingsBackup = backup(paths.claudeSettings);
-  if (claudeSettingsBackup) backups.push(claudeSettingsBackup);
-  mkdirSync(dirname(paths.claudeSettings), { recursive: true });
-  writeFileSync(
-    paths.claudeSettings,
-    mergeClaudeSettings(readIfExists(paths.claudeSettings), claudeHookCmd),
-    "utf8",
+  // 3. Claude：全局 hooks + user-scope MCP
+  backupAndWrite(
+    user.claudeSettings,
+    mergeClaudeSettings(readIfExists(user.claudeSettings), claudeHookCmd),
+    backups,
   );
-  const claudeMcpBackup = backup(paths.claudeMcp);
-  if (claudeMcpBackup) backups.push(claudeMcpBackup);
-  writeFileSync(
-    paths.claudeMcp,
-    mergeClaudeMcpJson(readIfExists(paths.claudeMcp), mcpUrl),
-    "utf8",
-  );
-  const claudeMdBackup = backup(paths.claudeMd);
-  if (claudeMdBackup) backups.push(claudeMdBackup);
-  writeFileSync(
-    paths.claudeMd,
-    upsertMarkerBlock(readIfExists(paths.claudeMd), CLAUDE_MD_BLOCK),
-    "utf8",
-  );
-  // 用户级 MCP：让任意目录启动的 claude 会话都能调用办公室工具
-  // （.mcp.json 只在项目目录内生效，这里再注册一份 user scope）
   if (registerClaudeUserMcp(mcpUrl)) {
     notes.push("已注册 Claude 用户级 MCP（claude mcp add --scope user agent-office）。");
   } else {
     notes.push(
-      `未检测到 claude CLI 或注册失败；如需在项目目录外使用，请手工执行：claude mcp add --scope user --transport http agent-office ${mcpUrl}`,
+      `未检测到 claude CLI 或注册失败；请手工执行：claude mcp add --scope user --transport http agent-office ${mcpUrl}`,
     );
   }
 
-  console.log("[agent-office] 安装完成。");
-  console.log(`  工作区: ${workspace}`);
+  // ---------- 工作区级（可选）：标记「办公室工作区」，写入可随仓库共享的文件 ----------
+  if (workspace) {
+    const ws = workspacePaths(workspace);
+    mkdirSync(dirname(ws.cursorRule), { recursive: true });
+    writeFileSync(ws.cursorRule, RULE_CONTENT, "utf8");
+    backupAndWrite(
+      ws.agentsMd,
+      upsertMarkerBlock(readIfExists(ws.agentsMd), AGENTS_MD_BLOCK),
+      backups,
+    );
+    backupAndWrite(ws.claudeMcp, mergeClaudeMcpJson(readIfExists(ws.claudeMcp), mcpUrl), backups);
+    backupAndWrite(
+      ws.claudeMd,
+      upsertMarkerBlock(readIfExists(ws.claudeMd), CLAUDE_MD_BLOCK),
+      backups,
+    );
+    // 清理旧版本装在工作区的 Cursor 配置，避免 hooks 双份触发
+    cleanupLegacyWorkspaceCursor(ws, backups);
+  }
+
+  console.log("[agent-office] 安装完成（用户级，全部客户端任意目录可用）。");
+  if (workspace) console.log(`  办公室工作区: ${workspace}`);
   console.log(`  MCP 端点: ${mcpUrl}`);
   if (backups.length > 0) {
     console.log("  备份文件:");
@@ -235,67 +247,70 @@ export function install(workspace: string): void {
   console.log("    3. 重启 Cursor 会话、Codex 终端与 Claude Code 会话以加载新配置。");
 }
 
-export function uninstall(workspace: string): void {
-  const paths = resolvePaths(workspace);
+/** 移除旧版本写入工作区的 .cursor/mcp.json 与 hooks.json 中的 agent-office 条目 */
+function cleanupLegacyWorkspaceCursor(ws: WorkspacePaths, backups: string[]): void {
+  const legacyMcp = readIfExists(ws.legacyCursorMcp);
+  if (legacyMcp?.includes("agent-office")) {
+    backupAndWrite(ws.legacyCursorMcp, removeFromMcpJson(legacyMcp), backups);
+  }
+  const legacyHooks = readIfExists(ws.legacyCursorHooks);
+  if (legacyHooks?.includes("cursor-hook.mjs")) {
+    const remaining = removeFromHooksJson(legacyHooks);
+    backupAndWrite(
+      ws.legacyCursorHooks,
+      remaining ?? JSON.stringify({ version: 1, hooks: {} }, null, 2) + "\n",
+      backups,
+    );
+  }
+}
+
+export function uninstall(workspace: string | null): void {
+  const user = userPaths();
   const touched: string[] = [];
 
-  const mcp = readIfExists(paths.cursorMcp);
-  if (mcp) {
-    backup(paths.cursorMcp);
-    writeFileSync(paths.cursorMcp, removeFromMcpJson(mcp), "utf8");
-    touched.push(paths.cursorMcp);
-  }
-  const hooks = readIfExists(paths.cursorHooks);
-  if (hooks) {
-    backup(paths.cursorHooks);
-    const remaining = removeFromHooksJson(hooks);
-    writeFileSync(
-      paths.cursorHooks,
-      remaining ?? JSON.stringify({ version: 1, hooks: {} }, null, 2) + "\n",
-      "utf8",
-    );
-    touched.push(paths.cursorHooks);
-  }
-  const agentsMd = readIfExists(paths.agentsMd);
-  if (agentsMd) {
-    backup(paths.agentsMd);
-    writeFileSync(paths.agentsMd, removeMarkerBlock(agentsMd), "utf8");
-    touched.push(paths.agentsMd);
-  }
-  const codex = readIfExists(paths.codexConfig);
-  if (codex) {
-    backup(paths.codexConfig);
-    writeFileSync(paths.codexConfig, removeFromCodexToml(codex), "utf8");
-    touched.push(paths.codexConfig);
-  }
-  const claudeSettings = readIfExists(paths.claudeSettings);
-  if (claudeSettings) {
-    backup(paths.claudeSettings);
-    writeFileSync(paths.claudeSettings, removeFromClaudeSettings(claudeSettings), "utf8");
-    touched.push(paths.claudeSettings);
-  }
-  const claudeMcp = readIfExists(paths.claudeMcp);
-  if (claudeMcp) {
-    backup(paths.claudeMcp);
-    writeFileSync(paths.claudeMcp, removeFromMcpJson(claudeMcp), "utf8");
-    touched.push(paths.claudeMcp);
-  }
-  const claudeMd = readIfExists(paths.claudeMd);
-  if (claudeMd) {
-    backup(paths.claudeMd);
-    writeFileSync(paths.claudeMd, removeMarkerBlock(claudeMd), "utf8");
-    touched.push(paths.claudeMd);
-  }
+  const edit = (path: string, transform: (content: string) => string | null): void => {
+    const content = readIfExists(path);
+    if (!content) return;
+    backup(path);
+    const next = transform(content);
+    if (next !== null) {
+      writeFileSync(path, next, "utf8");
+      touched.push(path);
+    }
+  };
+
+  // 用户级
+  edit(user.cursorMcp, removeFromMcpJson);
+  edit(user.cursorHooks, (c) =>
+    removeFromHooksJson(c) ?? JSON.stringify({ version: 1, hooks: {} }, null, 2) + "\n",
+  );
+  edit(user.codexConfig, removeFromCodexToml);
+  edit(user.codexAgentsMd, removeMarkerBlock);
+  edit(user.claudeSettings, removeFromClaudeSettings);
   removeClaudeUserMcp();
-  console.log("[agent-office] 已卸载接入配置（均有备份）。规则文件如需删除请手工移除：");
-  console.log(`  - ${paths.cursorRule}`);
+
+  // 工作区级（含旧版本遗留的 Cursor 配置）
+  if (workspace) {
+    const ws = workspacePaths(workspace);
+    edit(ws.agentsMd, removeMarkerBlock);
+    edit(ws.claudeMcp, removeFromMcpJson);
+    edit(ws.claudeMd, removeMarkerBlock);
+    edit(ws.legacyCursorMcp, removeFromMcpJson);
+    edit(ws.legacyCursorHooks, (c) =>
+      removeFromHooksJson(c) ?? JSON.stringify({ version: 1, hooks: {} }, null, 2) + "\n",
+    );
+    console.log("[agent-office] 规则文件如需删除请手工移除：");
+    console.log(`  - ${ws.cursorRule}`);
+  }
+  console.log("[agent-office] 已卸载接入配置（均有备份）。");
   for (const t of touched) console.log(`  已更新: ${t}`);
 }
 
 // ---------- CLI ----------
+// install [--workspace <路径>]：用户级安装；--workspace 可选，用于标记办公室工作区
 const [, , command, ...rest] = process.argv;
 if (command === "install" || command === "uninstall") {
-  let workspace = process.cwd();
+  let workspace: string | null = null;
   const flagIdx = rest.indexOf("--workspace");
   if (flagIdx !== -1 && rest[flagIdx + 1]) workspace = resolve(rest[flagIdx + 1]);
   if (command === "install") install(workspace);
