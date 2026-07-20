@@ -9,6 +9,7 @@
   },
   "scripts": {
     "build": "pnpm -r build",
+    "dist": "node scripts/dist.mjs",
     "test": "pnpm -r test",
     "start": "node apps/hub/dist/index.js",
     "office:install": "node apps/hub/dist/setup/install.js install",

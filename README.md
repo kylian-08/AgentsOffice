@@ -62,10 +62,13 @@ pnpm start
 ### 桌面客户端（exe）
 
 ```bash
-pnpm --filter @agent-office/desktop dist
+pnpm dist
 ```
 
-产物在 `apps/desktop/release*/`：`AgentOffice Setup <版本>.exe`（安装版）与 `AgentOffice-<版本>-portable.exe`（便携版）。
+一条命令完成：全量构建 → electron-builder 打包 → 把最新 exe 拷到仓库根目录——
+`AgentOffice.exe`（便携版，双击即用）与 `AgentOffice-Setup.exe`（安装包）。
+**约定：每次改完代码都跑一遍 `pnpm dist`，保证根目录的 exe 永远是最新版。**
+原始产物仍在 `apps/desktop/release/`（`AgentOffice Setup <版本>.exe` / `AgentOffice-<版本>-portable.exe`）。
 客户端自带 hub 与网页：启动时若发现本机 4517 已有 hub 在跑则直接连上（退出时不动它）；
 否则用 Electron 内置 Node 拉起打包好的 hub，关窗即回收。数据仍在 `~/.agent-office`，与命令行方式完全共用。
 

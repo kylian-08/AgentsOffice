@@ -4,3 +4,6 @@ dist/
 .DS_Store
 data/
 apps/desktop/release*/
+# 根目录 exe 产物（pnpm dist 生成，体积大不进库）
+/AgentOffice.exe
+/AgentOffice-Setup.exe
