@@ -6,12 +6,15 @@ import type {
   OfficeEvent,
   OfficeGroup,
   OfficeMessage,
+  OfficeRole,
   OfficeTask,
+  RoleDossier,
 } from "@agent-office/protocol";
 
 export interface OfficeState {
   agents: AgentCard[];
   groups: OfficeGroup[];
+  roles: OfficeRole[];
   messages: OfficeMessage[];
   tasks: OfficeTask[];
   briefs: OfficeBrief[];
@@ -95,6 +98,30 @@ export const api = {
     }).then((r) => json<OfficeGroup>(r)),
   deleteGroup: (id: string) =>
     fetch(`/api/groups/${id}`, { method: "DELETE" }).then((r) => json<{ ok: boolean }>(r)),
+  createRole: (name: string, description?: string) =>
+    fetch("/api/roles", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name, description }),
+    }).then((r) => json<OfficeRole>(r)),
+  deleteRole: (id: string) =>
+    fetch(`/api/roles/${id}`, { method: "DELETE" }).then((r) => json<{ ok: boolean }>(r)),
+  roleDossier: (id: string) =>
+    fetch(`/api/roles/${id}/dossier`).then((r) => json<RoleDossier>(r)),
+  roleNoteCreate: (roleId: string, input: { title: string; content: string }) =>
+    fetch(`/api/roles/${roleId}/notes`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    }).then((r) => json<{ ok: boolean; noteId: string }>(r)),
+  roleNoteDelete: (roleId: string, noteId: string) =>
+    fetch(`/api/roles/${roleId}/notes/${noteId}`, { method: "DELETE" }).then((r) =>
+      json<{ ok: boolean }>(r),
+    ),
+  clearChannel: (channel: string) =>
+    fetch(`/api/channels/${channel}/messages`, { method: "DELETE" }).then((r) =>
+      json<{ ok: boolean; cleared: number }>(r),
+    ),
   createTask: (title: string, description: string, assignee: string | null) =>
     fetch("/api/tasks", {
       method: "POST",
@@ -121,7 +148,13 @@ export const api = {
     }).then((r) => json<AgentCard>(r)),
   updateAgent: (
     id: string,
-    patch: { name?: string; model?: string; title?: string; groupIds?: string[] },
+    patch: {
+      name?: string;
+      model?: string;
+      title?: string;
+      groupIds?: string[];
+      roleId?: string | null;
+    },
   ) =>
     fetch(`/api/agents/${id}`, {
       method: "PATCH",

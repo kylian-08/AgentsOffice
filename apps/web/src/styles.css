@@ -2670,3 +2670,130 @@ button:focus-visible {
   gap: 10px;
   padding: 12px 20px;
 }
+
+/* ---------- 职位选择与档案 ---------- */
+.role-picker {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.role-picker select {
+  flex: 1;
+  min-width: 0;
+  background: var(--panel, #161a22);
+  border: 1px solid var(--border, #2a2f3a);
+  color: var(--text, #d8dee9);
+  border-radius: 8px;
+  padding: 5px 8px;
+  font-size: 12.5px;
+}
+
+.dossier-btn {
+  margin-left: 4px;
+  font-size: 12px;
+}
+
+.dossier-modal {
+  width: min(640px, 94vw);
+  max-height: 84vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.dossier-holder {
+  margin-left: 10px;
+  font-size: 12px;
+  font-weight: normal;
+  color: var(--text-dim, #aab2c0);
+}
+
+.dossier-body {
+  overflow-y: auto;
+}
+
+.dossier-hint {
+  font-size: 12.5px;
+  color: var(--text-dim, #aab2c0);
+}
+
+.dossier-body h4 {
+  margin: 14px 0 6px;
+  font-size: 13px;
+}
+
+.dossier-note {
+  border: 1px solid var(--border, #2a2f3a);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+
+.dossier-note-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+}
+
+.dossier-note-head span {
+  color: var(--text-dim, #aab2c0);
+  font-size: 11.5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.dossier-note pre {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12.5px;
+  color: var(--text, #d8dee9);
+  font-family: inherit;
+}
+
+.dossier-new-note {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.dossier-new-note input,
+.dossier-new-note textarea {
+  background: var(--panel, #161a22);
+  border: 1px solid var(--border, #2a2f3a);
+  color: var(--text, #d8dee9);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12.5px;
+  resize: vertical;
+}
+
+.dossier-new-note button {
+  align-self: flex-start;
+}
+
+.dossier-brief,
+.dossier-msg {
+  font-size: 12.5px;
+  color: var(--text-dim, #aab2c0);
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--border, #2a2f3a);
+}
+
+.dossier-error {
+  padding: 0 20px;
+}
+
+.channel-clear {
+  margin-left: auto;
+  opacity: 0.75;
+}
+
+.channel-clear:hover {
+  opacity: 1;
+  color: #f87171;
+}

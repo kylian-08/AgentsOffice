@@ -13,7 +13,9 @@ import type {
   LogEntry,
   OfficeBrief,
   OfficeGroup,
+  OfficeRole,
   OfficeTask,
+  RoleDossier,
 } from "@agent-office/protocol";
 import { api, type Health, type OfficeState, type TerminalPane } from "./api";
 import { ShellBoard } from "./ShellBoard";
@@ -225,15 +227,145 @@ function HistoryModal({ agent, onClose }: { agent: AgentCard; onClose: () => voi
   );
 }
 
+// ---------- 职位档案弹窗 ----------
+
+function RoleDossierModal({
+  role,
+  onClose,
+  onChanged,
+}: {
+  role: OfficeRole;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  const [dossier, setDossier] = useState<RoleDossier | null>(null);
+  const [error, setError] = useState("");
+  const [noteTitle, setNoteTitle] = useState("");
+  const [noteContent, setNoteContent] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      setDossier(await api.roleDossier(role.id));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [role.id]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const addNote = async () => {
+    if (!noteTitle.trim() || !noteContent.trim()) return;
+    try {
+      await api.roleNoteCreate(role.id, { title: noteTitle.trim(), content: noteContent });
+      setNoteTitle("");
+      setNoteContent("");
+      await load();
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const delNote = async (noteId: string) => {
+    try {
+      await api.roleNoteDelete(role.id, noteId);
+      await load();
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  return (
+    <div className="modal-mask" onClick={onClose}>
+      <div className="modal dossier-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <h3>
+            职位档案 · {role.name}
+            {(role.holderNames?.length ?? 0) > 0 && (
+              <span className="dossier-holder">在岗：{role.holderNames!.join("、")}</span>
+            )}
+          </h3>
+          <button className="icon-btn" title="关闭" onClick={onClose}>
+            ×
+          </button>
+        </div>
+        {error && <div className="form-error dossier-error">{error}</div>}
+        <div className="modal-body dossier-body">
+          <p className="dossier-hint">
+            档案跟职位走、不跟人走：笔记、历任简报、岗位收到过的定向消息都会自动交接给任何接任者（不限
+            Cursor / Codex / Claude）。
+          </p>
+          <h4>档案笔记（{dossier?.notes.length ?? 0}）</h4>
+          {(dossier?.notes ?? []).map((n) => (
+            <div key={n.id} className="dossier-note">
+              <div className="dossier-note-head">
+                <strong>{n.title}</strong>
+                <span>
+                  {n.author ?? "匿名"} · {new Date(n.updatedAt).toLocaleString()}
+                  <button className="icon-btn danger" title="删除笔记" onClick={() => void delNote(n.id)}>
+                    ×
+                  </button>
+                </span>
+              </div>
+              <pre>{n.content}</pre>
+            </div>
+          ))}
+          <div className="dossier-new-note">
+            <input
+              placeholder="笔记标题（如 测试环境账号）"
+              value={noteTitle}
+              onChange={(e) => setNoteTitle(e.target.value)}
+            />
+            <textarea
+              placeholder="内容：账号密码、仓库路径、架构结论、重要决策……写进来就跟着职位走"
+              value={noteContent}
+              rows={3}
+              onChange={(e) => setNoteContent(e.target.value)}
+            />
+            <button className="primary-btn sm" onClick={() => void addNote()}>
+              ＋ 写入档案
+            </button>
+          </div>
+          {(dossier?.briefs.length ?? 0) > 0 && (
+            <>
+              <h4>历任简报（近 {dossier!.briefs.length} 份）</h4>
+              {dossier!.briefs.map((b, i) => (
+                <div key={i} className="dossier-brief">
+                  <strong>{b.agentName}</strong>：{b.title} — {b.result.slice(0, 160)}
+                </div>
+              ))}
+            </>
+          )}
+          {(dossier?.messages.length ?? 0) > 0 && (
+            <>
+              <h4>岗位收到过的指示（近 {dossier!.messages.length} 条）</h4>
+              {dossier!.messages.map((m, i) => (
+                <div key={i} className="dossier-msg">
+                  <strong>{m.fromName}</strong>：{m.text.slice(0, 200)}
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ---------- 工位卡片 ----------
 
 function AgentBadge({
   agent,
   groups,
+  roles,
   onMention,
   onChanged,
 }: {
   agent: AgentCard;
+  roles: OfficeRole[];
   groups: OfficeGroup[];
   onMention: (name: string) => void;
   onChanged: () => void;
@@ -241,18 +373,19 @@ function AgentBadge({
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(agent.name);
   const [model, setModel] = useState(meta(agent).model ?? "");
-  const [title, setTitle] = useState(meta(agent).title ?? "");
+  const [roleId, setRoleId] = useState(meta(agent).roleId ?? "");
   const [groupIds, setGroupIds] = useState<string[]>(agent.groupIds ?? []);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [dossierOpen, setDossierOpen] = useState(false);
 
   const save = async () => {
     try {
       await api.updateAgent(agent.id, {
         name: name.trim(),
         model,
-        title,
+        ...(agent.kind !== "user" ? { roleId: roleId || null } : {}),
         ...(agent.kind !== "user" && agent.kind !== "supervisor" ? { groupIds } : {}),
       });
       setEditing(false);
@@ -266,7 +399,7 @@ function AgentBadge({
   const makeAvatar = async () => {
     setBusy(true);
     try {
-      await api.generateAvatar(agent.id, title || undefined);
+      await api.generateAvatar(agent.id, meta(agent).title || undefined);
       onChanged();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -354,7 +487,20 @@ function AgentBadge({
         </div>
       )}
 
-      {!editing && m.title && <div className="badge-title">职位：{m.title}</div>}
+      {!editing && m.title && (
+        <div className="badge-title">
+          职位：{m.title}
+          {m.roleId && (
+            <button
+              className="icon-btn dossier-btn"
+              title="查看职位档案（笔记 / 历任简报 / 岗位消息，交接时自动继承）"
+              onClick={() => setDossierOpen(true)}
+            >
+              📋
+            </button>
+          )}
+        </div>
+      )}
       {!editing && (agent.groupNames?.length ?? 0) > 0 && (
         <div className="badge-groups">
           {agent.groupNames!.map((gn) => (
@@ -374,12 +520,35 @@ function AgentBadge({
             onKeyDown={(e) => e.key === "Enter" && void save()}
           />
           {agent.kind !== "user" && (
-            <input
-              placeholder="职位（如 测试 / git 库管理）"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && void save()}
-            />
+            <div className="role-picker">
+              <select value={roleId} onChange={(e) => setRoleId(e.target.value)} title="选择职位">
+                <option value="">（无职位）</option>
+                {roles.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.name}
+                    {(r.holderNames?.length ?? 0) > 0 ? `（在岗：${r.holderNames!.join("、")}）` : ""}
+                  </option>
+                ))}
+              </select>
+              <button
+                className="ghost-btn sm"
+                title="新建职位"
+                onClick={async () => {
+                  const rn = window.prompt("新职位名（如 测试 / git 库管理 / 架构分析）");
+                  if (!rn?.trim()) return;
+                  const desc = window.prompt("职位说明（可选，回车跳过）") ?? undefined;
+                  try {
+                    const role = await api.createRole(rn.trim(), desc?.trim() || undefined);
+                    setRoleId(role.id);
+                    onChanged();
+                  } catch (e) {
+                    setError(e instanceof Error ? e.message : String(e));
+                  }
+                }}
+              >
+                ＋职位
+              </button>
+            </div>
           )}
           {agent.kind !== "user" && agent.kind !== "supervisor" && groups.length > 0 && (
             <div className="group-picker">
@@ -445,7 +614,7 @@ function AgentBadge({
               setEditing((v) => !v);
               setName(agent.name);
               setModel(m.model ?? "");
-              setTitle(m.title ?? "");
+              setRoleId(m.roleId ?? "");
               setGroupIds(agent.groupIds ?? []);
             }}
           >
@@ -485,6 +654,13 @@ function AgentBadge({
       </div>
 
       {historyOpen && <HistoryModal agent={agent} onClose={() => setHistoryOpen(false)} />}
+      {dossierOpen && m.roleId && (
+        <RoleDossierModal
+          role={roles.find((r) => r.id === m.roleId) ?? { id: m.roleId, name: m.title ?? "职位", description: null, createdAt: 0 }}
+          onClose={() => setDossierOpen(false)}
+          onChanged={onChanged}
+        />
+      )}
     </div>
   );
 }
@@ -1349,6 +1525,21 @@ function ChannelBar({
     }
   };
 
+  const clear = async () => {
+    const label =
+      channel === "hall" ? "大群" : `#${groups.find((g) => g.id === channel)?.name ?? "频道"}`;
+    if (!window.confirm(`清空${label}的全部消息？此操作不可恢复（事件、简报、职位档案笔记不受影响）。`)) {
+      return;
+    }
+    try {
+      const { cleared } = await api.clearChannel(channel);
+      window.alert(`已清空 ${cleared} 条消息`);
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
   return (
     <div className="channel-bar" role="tablist" aria-label="频道">
       <button
@@ -1404,6 +1595,13 @@ function ChannelBar({
           ＋ 建组
         </button>
       )}
+      <button
+        className="channel-tab channel-clear"
+        title={`清空当前频道（${channel === "hall" ? "大群" : "组频道"}）的全部消息`}
+        onClick={() => void clear()}
+      >
+        🧹 清空
+      </button>
       {error && <span className="form-error">{error}</span>}
     </div>
   );
@@ -2065,6 +2263,7 @@ export function App() {
                     key={agent.id}
                     agent={agent}
                     groups={state.groups ?? []}
+                    roles={state.roles ?? []}
                     onMention={(name) => setMentionPrefill(`@${name}`)}
                     onChanged={refresh}
                   />

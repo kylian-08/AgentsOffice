@@ -6,6 +6,8 @@ import {
   type BriefInput,
   type KbDoc,
   type OfficeGroup,
+  type OfficeRole,
+  type RoleDossier,
   type TaskStatus,
 } from "@agent-office/protocol";
 import { existsSync } from "node:fs";
@@ -157,6 +159,11 @@ export class OfficeService {
       channel,
       images: input.images,
     });
+    // 定向给在岗者的消息进岗位档案，接任者可完整继承（账号、指示、结论都在里面）
+    for (const agent of targetAgents.values()) {
+      const roleId = (agent.meta as { roleId?: string }).roleId;
+      if (roleId) this.store.tagRoleMessage(roleId, messageId);
+    }
     this.logs.append({
       source: "message",
       agentName: sender.name,
@@ -369,6 +376,118 @@ export class OfficeService {
     });
     this.emit("agent", { agentId });
     return { ok: true };
+  }
+
+  // ---------- 职位（岗位上下文交接） ----------
+
+  createRole(name: string, description?: string): { ok: boolean; error?: string; role?: OfficeRole } {
+    if (!name.trim()) return { ok: false, error: "职位名不能为空" };
+    const role = this.store.createRole(name, description);
+    if (!role) return { ok: false, error: "职位已存在" };
+    this.event({ type: "role", text: `新建职位「${role.name}」` });
+    this.emit("role", { roleId: role.id });
+    return { ok: true, role };
+  }
+
+  deleteRole(roleId: string): { ok: boolean; error?: string } {
+    const role = this.store.getRoleById(roleId);
+    if (!role) return { ok: false, error: "职位不存在" };
+    this.store.deleteRole(roleId);
+    this.event({ type: "role", text: `职位「${role.name}」已撤销，档案一并清除` });
+    this.emit("role", { roleId });
+    this.emit("agent", {});
+    return { ok: true };
+  }
+
+  /** 任免：把职位（连同全部岗位档案）交给某位员工；roleId 传 null 卸任 */
+  assignRole(agentId: string, roleId: string | null): { ok: boolean; error?: string } {
+    const agent = this.store.getAgentById(agentId);
+    if (!agent) return { ok: false, error: "成员不存在" };
+    if (agent.kind === "user") return { ok: false, error: "boss 不占用职位" };
+    const prevRoleId = (agent.meta as { roleId?: string }).roleId;
+    if (!this.store.setAgentRole(agentId, roleId)) {
+      return { ok: false, error: "职位不存在" };
+    }
+    if (roleId && roleId !== prevRoleId) {
+      const role = this.store.getRoleById(roleId)!;
+      const dossier = this.roleDossier(roleId);
+      this.event({
+        type: "role",
+        agentId,
+        text: `「${agent.name}」接任职位「${role.name}」，继承岗位档案（${dossier?.notes.length ?? 0} 条笔记 / ${dossier?.briefs.length ?? 0} 份历任简报 / ${dossier?.messages.length ?? 0} 条岗位消息）`,
+      });
+    } else if (!roleId && prevRoleId) {
+      const prev = this.store.getRoleById(prevRoleId);
+      this.event({
+        type: "role",
+        agentId,
+        text: `「${agent.name}」卸任「${prev?.name ?? "职位"}」，岗位档案保留待下一任接手`,
+      });
+    }
+    this.emit("agent", { agentId });
+    return { ok: true };
+  }
+
+  /** 职位交接档案：笔记 + 历任简报 + 岗位收到过的定向消息 */
+  roleDossier(roleId: string): RoleDossier | null {
+    const role = this.store.listRoles().find((r) => r.id === roleId);
+    if (!role) return null;
+    return {
+      role,
+      notes: this.store.listRoleNotes(roleId),
+      briefs: this.store.roleBriefs(roleId, 10).map((b) => ({
+        agentName: b.agentName,
+        title: b.title,
+        result: b.result,
+        createdAt: b.createdAt,
+      })),
+      messages: this.store.roleMessages(roleId, 30),
+    };
+  }
+
+  /** 员工当前职位的交接档案（无职位返回 null） */
+  agentRoleDossier(agent: AgentCard): RoleDossier | null {
+    const roleId = (agent.meta as { roleId?: string }).roleId;
+    return roleId ? this.roleDossier(roleId) : null;
+  }
+
+  writeRoleNote(input: {
+    roleId?: string;
+    roleName?: string;
+    title: string;
+    content: string;
+    author?: string;
+  }): { ok: boolean; error?: string; noteId?: string } {
+    const role = input.roleId
+      ? this.store.getRoleById(input.roleId)
+      : this.store.listRoles().find((r) => r.name.toLowerCase() === input.roleName?.trim().toLowerCase());
+    if (!role) return { ok: false, error: "职位不存在" };
+    const note = this.store.createRoleNote({
+      roleId: role.id,
+      title: input.title,
+      content: input.content,
+      author: input.author ?? null,
+    });
+    if (!note) return { ok: false, error: "笔记写入失败" };
+    this.event({
+      type: "role",
+      text: `「${input.author ?? "匿名"}」向职位「${role.name}」档案写入笔记：${truncate(input.title, 60)}`,
+    });
+    this.emit("role", { roleId: role.id });
+    return { ok: true, noteId: note.id };
+  }
+
+  /** 清空某频道的全部消息（大群或项目组频道） */
+  clearChannel(channel: string): { ok: boolean; error?: string; cleared?: number } {
+    if (channel !== HALL_CHANNEL && !this.store.getGroupById(channel)) {
+      return { ok: false, error: "频道不存在" };
+    }
+    const cleared = this.store.clearChannelMessages(channel);
+    const label =
+      channel === HALL_CHANNEL ? "大群" : `#${this.store.getGroupById(channel)?.name}`;
+    this.event({ type: "channel", text: `${label} 的 ${cleared} 条消息已清空` });
+    this.emit("message", {});
+    return { ok: true, cleared };
   }
 
   // ---------- Agent 管理 ----------
@@ -737,6 +856,7 @@ export class OfficeService {
     return {
       bossName: this.bossName(),
       groups: this.store.listGroups(),
+      roles: this.store.listRoles(),
       roster: this.store.listAgents().map((a) => ({
         name: a.name,
         kind: a.kind,

@@ -365,5 +365,76 @@ export function createMcpServer(office: OfficeService): McpServer {
     },
   );
 
+  server.registerTool(
+    "get_role_context",
+    {
+      title: "获取职位交接档案",
+      description:
+        "获取某职位的完整岗位上下文：职位说明、档案笔记（账号/路径/架构/决策等硬信息）、历任在岗者的简报、岗位收到过的定向消息。接任职位后先调用它，把档案当作自己的记忆使用。可按职位名或你的工号查询。",
+      inputSchema: {
+        agent: z.string().optional().describe("你的工号（查你当前职位的档案）"),
+        role: z.string().optional().describe("职位名（直接指定职位）"),
+      },
+    },
+    async (args) => {
+      let roleId: string | undefined;
+      if (args.role?.trim()) {
+        roleId = office.store
+          .listRoles()
+          .find((r) => r.name.toLowerCase() === args.role!.trim().toLowerCase())?.id;
+        if (!roleId) return text({ ok: false, error: `职位「${args.role}」不存在` });
+      } else if (args.agent?.trim()) {
+        const agent = office.store.getAgentByName(args.agent.trim());
+        if (!agent) return text({ ok: false, error: `工号 ${args.agent} 未登记` });
+        roleId = (agent.meta as { roleId?: string }).roleId;
+        if (!roleId) return text({ ok: false, error: `「${agent.name}」当前没有任职` });
+      } else {
+        return text({ ok: false, error: "agent 与 role 至少传一个" });
+      }
+      const dossier = office.roleDossier(roleId);
+      if (!dossier) return text({ ok: false, error: "职位不存在" });
+      return text({ ok: true, dossier });
+    },
+  );
+
+  server.registerTool(
+    "role_note_write",
+    {
+      title: "写入职位档案笔记",
+      description:
+        "把岗位关键信息写进职位档案（跟职位走、不跟人走）：账号密码、仓库路径、架构结论、重要决策、操作手册等。你下线后，任何接任者都会继承这些笔记，请及时沉淀。",
+      inputSchema: {
+        agent: z.string().describe("你的工号（作为笔记署名）"),
+        role: z
+          .string()
+          .optional()
+          .describe("职位名；缺省写入你当前任职的职位"),
+        title: z.string().min(1).max(200).describe("笔记标题，如「测试环境账号」"),
+        content: z.string().min(1).describe("笔记内容"),
+      },
+    },
+    async (args) => {
+      let roleId: string | undefined;
+      let roleName = args.role?.trim();
+      if (!roleName) {
+        const agent = office.store.getAgentByName(args.agent.trim());
+        if (!agent) return text({ ok: false, error: `工号 ${args.agent} 未登记` });
+        roleId = (agent.meta as { roleId?: string }).roleId;
+        if (!roleId) {
+          return text({ ok: false, error: "你当前没有任职，请用 role 参数指定职位名" });
+        }
+      }
+      const result = office.writeRoleNote({
+        roleId,
+        roleName,
+        title: args.title,
+        content: args.content,
+        author: args.agent,
+      });
+      if (!result.ok) return text({ ok: false, error: result.error });
+      return text({ ok: true, noteId: result.noteId });
+    },
+  );
+
   return server;
 }

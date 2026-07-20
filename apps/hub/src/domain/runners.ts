@@ -403,6 +403,9 @@ export function createManagedDispatcher(
             senderName: message.fromName,
             text: message.text,
             imagePaths,
+            // 在岗者自动继承职位档案（笔记/历任简报/岗位定向消息）；取最新卡片防排队期间任免变化
+            roleDossier:
+              office.agentRoleDossier(store.getAgentById(agent.id) ?? agent) ?? undefined,
             contextBriefs: store.listBriefs(5).map((b) => ({
               agentName: b.agentName,
               title: b.title,

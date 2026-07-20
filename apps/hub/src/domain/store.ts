@@ -11,7 +11,9 @@ import type {
   OfficeEvent,
   OfficeGroup,
   OfficeMessage,
+  OfficeRole,
   OfficeTask,
+  RoleNote,
   TaskStatus,
 } from "@agent-office/protocol";
 import { now, uuid } from "../util.js";
@@ -116,6 +118,27 @@ CREATE TABLE IF NOT EXISTS group_members(
   PRIMARY KEY(group_id, agent_id)
 );
 CREATE INDEX IF NOT EXISTS idx_group_members_agent ON group_members(agent_id);
+CREATE TABLE IF NOT EXISTS roles(
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+  description TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS role_notes(
+  id TEXT PRIMARY KEY,
+  role_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  content TEXT NOT NULL,
+  author TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_role_notes_role ON role_notes(role_id, updated_at DESC);
+CREATE TABLE IF NOT EXISTS role_messages(
+  role_id TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  PRIMARY KEY(role_id, message_id)
+);
 CREATE INDEX IF NOT EXISTS idx_deliveries_to ON deliveries(to_agent_id, status);
 CREATE INDEX IF NOT EXISTS idx_briefs_created ON briefs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at DESC);
@@ -186,6 +209,12 @@ export class OfficeStore {
       this.db.exec("UPDATE agents SET group_id = NULL WHERE group_id IS NOT NULL");
     } catch {
       /* 旧列不存在（新库），无需迁移 */
+    }
+    // 旧库迁移：简报打职位标（发布时在岗职位，供接任者追溯）
+    try {
+      this.db.exec("ALTER TABLE briefs ADD COLUMN role_id TEXT");
+    } catch {
+      /* 列已存在 */
     }
   }
 
@@ -375,6 +404,185 @@ export class OfficeStore {
 
   groupMembers(groupId: string): AgentCard[] {
     return this.listAgents().filter((a) => a.groupIds?.includes(groupId));
+  }
+
+  // ---------- 职位（岗位上下文的锚点） ----------
+
+  createRole(name: string, description?: string): OfficeRole | null {
+    const id = uuid();
+    try {
+      this.db
+        .prepare("INSERT INTO roles(id, name, description, created_at) VALUES (?, ?, ?, ?)")
+        .run(id, name.trim(), description?.trim() || null, now());
+    } catch {
+      return null; // 重名
+    }
+    return this.getRoleById(id);
+  }
+
+  getRoleById(id: string): OfficeRole | null {
+    const row = this.db.prepare("SELECT * FROM roles WHERE id = ?").get(id) as
+      | { id: string; name: string; description: string | null; created_at: number }
+      | undefined;
+    if (!row) return null;
+    return { id: row.id, name: row.name, description: row.description, createdAt: row.created_at };
+  }
+
+  listRoles(): OfficeRole[] {
+    const rows = this.db.prepare("SELECT * FROM roles ORDER BY created_at ASC").all() as
+      unknown as Array<{ id: string; name: string; description: string | null; created_at: number }>;
+    const agents = this.listAgents();
+    const noteStmt = this.db.prepare(
+      "SELECT COUNT(*) AS cnt FROM role_notes WHERE role_id = ?",
+    );
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      description: row.description,
+      createdAt: row.created_at,
+      holderNames: agents
+        .filter((a) => (a.meta as { roleId?: string }).roleId === row.id)
+        .map((a) => a.name),
+      noteCount: (noteStmt.get(row.id) as { cnt: number }).cnt,
+    }));
+  }
+
+  /** 删除职位：清空在岗者的任职、连带删除档案笔记与定向消息索引 */
+  deleteRole(id: string): boolean {
+    const role = this.getRoleById(id);
+    if (!role) return false;
+    for (const agent of this.listAgents()) {
+      if ((agent.meta as { roleId?: string }).roleId === id) {
+        this.updateAgentMeta(agent.id, { roleId: undefined, title: undefined });
+      }
+    }
+    this.db.prepare("DELETE FROM role_notes WHERE role_id = ?").run(id);
+    this.db.prepare("DELETE FROM role_messages WHERE role_id = ?").run(id);
+    this.db.prepare("DELETE FROM roles WHERE id = ?").run(id);
+    return true;
+  }
+
+  /** 任免：roleId 为 null 表示卸任。职位显示名同步进 meta.title */
+  setAgentRole(agentId: string, roleId: string | null): boolean {
+    const agent = this.getAgentById(agentId);
+    if (!agent) return false;
+    if (roleId === null) {
+      this.updateAgentMeta(agentId, { roleId: undefined, title: undefined });
+      return true;
+    }
+    const role = this.getRoleById(roleId);
+    if (!role) return false;
+    this.updateAgentMeta(agentId, { roleId, title: role.name });
+    return true;
+  }
+
+  createRoleNote(input: {
+    roleId: string;
+    title: string;
+    content: string;
+    author?: string | null;
+  }): RoleNote | null {
+    if (!this.getRoleById(input.roleId)) return null;
+    const id = uuid();
+    const at = now();
+    this.db
+      .prepare(
+        `INSERT INTO role_notes(id, role_id, title, content, author, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(id, input.roleId, input.title.trim(), input.content, input.author ?? null, at, at);
+    return this.getRoleNote(id);
+  }
+
+  updateRoleNote(
+    id: string,
+    patch: { title?: string; content?: string },
+  ): RoleNote | null {
+    const note = this.getRoleNote(id);
+    if (!note) return null;
+    this.db
+      .prepare("UPDATE role_notes SET title = ?, content = ?, updated_at = ? WHERE id = ?")
+      .run(patch.title?.trim() || note.title, patch.content ?? note.content, now(), id);
+    return this.getRoleNote(id);
+  }
+
+  deleteRoleNote(id: string): boolean {
+    return Number(this.db.prepare("DELETE FROM role_notes WHERE id = ?").run(id).changes) > 0;
+  }
+
+  getRoleNote(id: string): RoleNote | null {
+    const row = this.db.prepare("SELECT * FROM role_notes WHERE id = ?").get(id) as
+      | Record<string, unknown>
+      | undefined;
+    if (!row) return null;
+    return {
+      id: row.id as string,
+      roleId: row.role_id as string,
+      title: row.title as string,
+      content: row.content as string,
+      author: (row.author as string) ?? null,
+      createdAt: row.created_at as number,
+      updatedAt: row.updated_at as number,
+    };
+  }
+
+  listRoleNotes(roleId: string): RoleNote[] {
+    const rows = this.db
+      .prepare("SELECT id FROM role_notes WHERE role_id = ? ORDER BY updated_at DESC")
+      .all(roleId) as unknown as Array<{ id: string }>;
+    return rows.map((r) => this.getRoleNote(r.id)!).filter(Boolean);
+  }
+
+  /** 定向消息进岗位档案：消息路由到在岗者时打标 */
+  tagRoleMessage(roleId: string, messageId: string): void {
+    this.db
+      .prepare("INSERT OR IGNORE INTO role_messages(role_id, message_id) VALUES (?, ?)")
+      .run(roleId, messageId);
+  }
+
+  /** 岗位收到过的定向消息（近 N 条，老→新） */
+  roleMessages(roleId: string, limit = 30): Array<{ fromName: string; text: string; createdAt: number }> {
+    const rows = this.db
+      .prepare(
+        `SELECT COALESCE(a.name, m.from_name, '系统') AS fromName, m.text, m.created_at AS createdAt
+         FROM role_messages rm
+         JOIN messages m ON m.id = rm.message_id
+         LEFT JOIN agents a ON a.id = m.from_agent_id
+         WHERE rm.role_id = ?
+         ORDER BY m.created_at DESC LIMIT ?`,
+      )
+      .all(roleId, limit) as unknown as Array<{ fromName: string; text: string; createdAt: number }>;
+    return rows.reverse();
+  }
+
+  /** 历任在岗者发布的简报（近 N 条，新→老） */
+  roleBriefs(roleId: string, limit = 10): OfficeBrief[] {
+    const rows = this.db
+      .prepare(
+        `SELECT b.*, COALESCE(a.name, '已离职成员') AS agent_name FROM briefs b
+         LEFT JOIN agents a ON a.id = b.agent_id
+         WHERE b.role_id = ? ORDER BY b.created_at DESC LIMIT ?`,
+      )
+      .all(roleId, limit) as unknown as Array<Record<string, unknown>>;
+    return rows.map((r) => this.briefFromRow(r));
+  }
+
+  /** 清空某频道的全部消息（含投递状态；岗位档案里的消息索引一并清理） */
+  clearChannelMessages(channel: string): number {
+    const ids = (
+      this.db.prepare("SELECT id FROM messages WHERE channel = ?").all(channel) as unknown as Array<{
+        id: string;
+      }>
+    ).map((r) => r.id);
+    if (ids.length === 0) return 0;
+    const delDelivery = this.db.prepare("DELETE FROM deliveries WHERE message_id = ?");
+    const delRoleMsg = this.db.prepare("DELETE FROM role_messages WHERE message_id = ?");
+    for (const id of ids) {
+      delDelivery.run(id);
+      delRoleMsg.run(id);
+    }
+    this.db.prepare("DELETE FROM messages WHERE channel = ?").run(channel);
+    return ids.length;
   }
 
   /** 累计今日 token 用量（托管执行结束时调用） */
@@ -759,12 +967,15 @@ export class OfficeStore {
     idempotencyKey?: string;
   }): OfficeBrief | null {
     const id = uuid();
+    // 简报打上发布者当时的职位标，接任者可按职位追溯历任工作
+    const roleId =
+      ((this.getAgentById(input.agentId)?.meta as { roleId?: string })?.roleId as string) ?? null;
     const result = this.db
       .prepare(
         `INSERT OR IGNORE INTO briefs(
            id, agent_id, task_id, kind, source, idempotency_key,
-           title, result, progress, decisions, artifacts, blockers, next_steps, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           title, result, progress, decisions, artifacts, blockers, next_steps, role_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -780,6 +991,7 @@ export class OfficeStore {
         input.brief.artifacts ?? null,
         input.brief.blockers ?? null,
         input.brief.next_steps ?? null,
+        roleId,
         now(),
       );
     if (Number(result.changes) === 0) return null;

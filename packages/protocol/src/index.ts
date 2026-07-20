@@ -45,6 +45,39 @@ export interface OfficeGroup {
   memberCount?: number;
 }
 
+/**
+ * 职位：绑定「岗位上下文」的第一公民。谁坐这个职位谁继承全部档案——
+ * 职位笔记（账号/路径/决策等硬信息）、历任简报、发给历任在岗者的定向消息。
+ */
+export interface OfficeRole {
+  id: string;
+  name: string;
+  description: string | null;
+  createdAt: number;
+  /** 当前在岗成员名（可多人同岗） */
+  holderNames?: string[];
+  noteCount?: number;
+}
+
+/** 职位档案笔记：跟职位走、不跟人走的持久信息 */
+export interface RoleNote {
+  id: string;
+  roleId: string;
+  title: string;
+  content: string;
+  author: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** 职位交接档案（喂给接任者的打包上下文） */
+export interface RoleDossier {
+  role: OfficeRole;
+  notes: RoleNote[];
+  briefs: Array<{ agentName: string; title: string; result: string; createdAt: number }>;
+  messages: Array<{ fromName: string; text: string; createdAt: number }>;
+}
+
 export interface OfficeMessage {
   id: string;
   fromAgentId: string | null;
@@ -128,8 +161,10 @@ export interface AgentMeta {
   /** 当前正在做的事（实时工作台展示） */
   lastActivity?: string;
   lastActivityAt?: number;
-  /** 职位（如 测试 / git 库管理） */
+  /** 职位显示名（选定职位后同步为职位名；老数据的自由文本保留展示） */
   title?: string;
+  /** 所任职位 ID（职位档案交接的锚点） */
+  roleId?: string;
   /** 头像 SVG（codex 生成或本地几何头像） */
   avatarSvg?: string;
   threadId?: string;
@@ -204,12 +239,32 @@ export function buildManagedPrompt(opts: {
   contextBriefs?: Array<{ agentName: string; title: string; result: string }>;
   /** 附图的本地文件绝对路径（提示 Agent 用图片查看工具打开） */
   imagePaths?: string[];
+  /** 职位交接档案：在岗者自动继承的岗位上下文 */
+  roleDossier?: RoleDossier;
 }): string {
   const lines = [
     `[Agent Office] 你是协作办公室的成员「${opts.agentName}」。`,
-    `来自「${opts.senderName}」的新消息：`,
-    opts.text,
   ];
+  if (opts.roleDossier) {
+    const d = opts.roleDossier;
+    lines.push(
+      `你现任职位「${d.role.name}」${d.role.description ? `（${d.role.description}）` : ""}。以下是职位档案——这个岗位积累的全部有效上下文（可能出自前任，直接当作你自己的记忆使用）：`,
+    );
+    for (const n of d.notes.slice(0, 8)) {
+      lines.push(`- [笔记] ${n.title}：${n.content.slice(0, 400)}`);
+    }
+    for (const b of d.briefs.slice(0, 3)) {
+      lines.push(`- [历任简报] ${b.agentName}：${b.title} — ${b.result.slice(0, 200)}`);
+    }
+    for (const m of d.messages.slice(-6)) {
+      lines.push(`- [岗位收到过的指示] ${m.fromName}：${m.text.slice(0, 200)}`);
+    }
+    lines.push(
+      "完整档案可用 MCP 工具 get_role_context 获取；工作中得到的岗位关键信息（账号、路径、架构结论、决策）请及时用 role_note_write 写进职位档案，方便任何接任者无缝接手。",
+      "",
+    );
+  }
+  lines.push(`来自「${opts.senderName}」的新消息：`, opts.text);
   if (opts.imagePaths && opts.imagePaths.length > 0) {
     lines.push(
       "",

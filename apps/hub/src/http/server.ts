@@ -82,6 +82,7 @@ export async function createServer(
   app.get("/api/state", async () => ({
     agents: office.store.listAgents(),
     groups: office.store.listGroups(),
+    roles: office.store.listRoles(),
     messages: office.store.listMessages(200),
     tasks: office.store.listTasks(),
     briefs: office.store.listBriefs(40),
@@ -251,6 +252,63 @@ export async function createServer(
     };
   });
 
+  // ---------- 职位（岗位上下文交接） ----------
+  app.get("/api/roles", async () => ({ roles: office.store.listRoles() }));
+
+  app.post("/api/roles", async (request, reply) => {
+    const body = (request.body ?? {}) as { name?: string; description?: string };
+    if (!body.name?.trim()) return reply.code(400).send({ error: "name 不能为空" });
+    const result = office.createRole(body.name, body.description);
+    if (!result.ok) return reply.code(409).send({ error: result.error });
+    return result.role;
+  });
+
+  app.delete("/api/roles/:id", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const result = office.deleteRole(id);
+    if (!result.ok) return reply.code(404).send({ error: result.error });
+    return { ok: true };
+  });
+
+  app.get("/api/roles/:id/dossier", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const dossier = office.roleDossier(id);
+    if (!dossier) return reply.code(404).send({ error: "职位不存在" });
+    return dossier;
+  });
+
+  app.post("/api/roles/:id/notes", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = (request.body ?? {}) as { title?: string; content?: string; author?: string };
+    if (!body.title?.trim() || !body.content?.trim()) {
+      return reply.code(400).send({ error: "title 与 content 不能为空" });
+    }
+    const result = office.writeRoleNote({
+      roleId: id,
+      title: body.title,
+      content: body.content,
+      author: body.author ?? office.bossName(),
+    });
+    if (!result.ok) return reply.code(404).send({ error: result.error });
+    return { ok: true, noteId: result.noteId };
+  });
+
+  app.delete("/api/roles/:roleId/notes/:noteId", async (request, reply) => {
+    const { noteId } = request.params as { roleId: string; noteId: string };
+    if (!office.store.deleteRoleNote(noteId)) {
+      return reply.code(404).send({ error: "笔记不存在" });
+    }
+    return { ok: true };
+  });
+
+  // ---------- 清空频道消息 ----------
+  app.delete("/api/channels/:channel/messages", async (request, reply) => {
+    const { channel } = request.params as { channel: string };
+    const result = office.clearChannel(channel);
+    if (!result.ok) return reply.code(404).send({ error: result.error });
+    return { ok: true, cleared: result.cleared };
+  });
+
   // ---------- 项目组 ----------
   app.get("/api/groups", async () => ({ groups: office.store.listGroups() }));
 
@@ -341,6 +399,8 @@ export async function createServer(
       title?: string;
       /** 组归属整体覆盖；空数组 = 退出所有组 */
       groupIds?: string[];
+      /** 任职职位 ID；null = 卸任 */
+      roleId?: string | null;
     };
     const agent = office.renameAgent(id, body);
     if (!agent) return reply.code(409).send({ error: "改名失败：Agent 不存在或工号已被占用" });
@@ -349,6 +409,10 @@ export async function createServer(
         return reply.code(400).send({ error: "groupIds 必须是字符串数组" });
       }
       const result = office.assignGroups(id, body.groupIds);
+      if (!result.ok) return reply.code(400).send({ error: result.error });
+    }
+    if (body.roleId !== undefined) {
+      const result = office.assignRole(id, body.roleId);
       if (!result.ok) return reply.code(400).send({ error: result.error });
     }
     return office.store.listAgents().find((a) => a.id === id) ?? agent;
