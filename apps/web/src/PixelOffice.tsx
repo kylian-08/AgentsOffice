@@ -69,6 +69,7 @@ export function PixelOffice({
   const [bubbles, setBubbles] = useState<Bubble[]>([]);
   const [busyAction, setBusyAction] = useState(false);
   const [error, setError] = useState("");
+  const [genPrompt, setGenPrompt] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
 
   const crew = useMemo(
@@ -179,26 +180,23 @@ export function PixelOffice({
 
   const generateSprite = useCallback(async () => {
     if (!selectedAgent) return;
-    const desc = window.prompt(
-      "描述想要的人物形象（交给本机 codex 画一张像素风 SVG）",
-      "可爱的像素风小人",
-    );
-    if (!desc?.trim()) return;
+    const desc = genPrompt.trim() || "可爱的像素风小人";
     setBusyAction(true);
     setError("");
     try {
-      await api.generateAvatar(selectedAgent.id, `像素画风格（pixel art），${desc.trim()}`);
+      await api.generateAvatar(selectedAgent.id, `像素画风格（pixel art），${desc}`);
       // 生成的是 avatarSvg；若之前有上传形象则清掉，让新生成的生效
       if ((selectedAgent.meta as AgentMeta).spriteUrl) {
         await api.updateAgent(selectedAgent.id, { spriteUrl: "" });
       }
+      setGenPrompt("");
       onChanged();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusyAction(false);
     }
-  }, [selectedAgent, onChanged]);
+  }, [selectedAgent, genPrompt, onChanged]);
 
   const clearSprite = useCallback(async () => {
     if (!selectedAgent) return;
@@ -309,18 +307,37 @@ export function PixelOffice({
             >
               上传形象图
             </button>
-            <button className="ghost-btn" disabled={busyAction} onClick={() => void generateSprite()}>
-              AI 生成形象
-            </button>
             {(selectedAgent.meta as AgentMeta).spriteUrl && (
               <button className="ghost-btn" disabled={busyAction} onClick={() => void clearSprite()}>
                 清除形象
               </button>
             )}
           </div>
+          <div className="px-gen">
+            <textarea
+              placeholder="描述想要的形象，如：库洛米，紫黑配色，戴着小恶魔头饰（交给本机 codex 画像素风 SVG）"
+              value={genPrompt}
+              rows={2}
+              disabled={busyAction}
+              onChange={(e) => setGenPrompt(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  void generateSprite();
+                }
+              }}
+            />
+            <button
+              className="ghost-btn"
+              disabled={busyAction}
+              onClick={() => void generateSprite()}
+            >
+              {busyAction ? "生成中…" : "✨ AI 生成形象"}
+            </button>
+          </div>
           <p className="px-panel-hint">
             支持 PNG / GIF / WebP（透明底最佳）。想要库洛米、皮卡丘、吉伊卡哇？
-            找一张透明底立绘传上来就行。
+            找一张透明底立绘传上来效果最好；AI 生成走本机 codex，约需 10–60 秒。
           </p>
           {error && <div className="form-error">{error}</div>}
           <input

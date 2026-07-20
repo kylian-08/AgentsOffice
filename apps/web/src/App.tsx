@@ -122,9 +122,12 @@ function Avatar({ agent, status }: { agent: Pick<AgentCard, "name" | "kind" | "m
 
 function BossNameControl({ boss, onChanged }: { boss: AgentCard | undefined; onChanged: () => void }) {
   const [error, setError] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
   if (!boss) return null;
   const rename = async () => {
-    const name = window.prompt("设置老板在办公室中的称呼", boss.name)?.trim();
+    const name = draft.trim();
+    setEditing(false);
     if (!name || name === boss.name) return;
     try {
       await api.updateAgent(boss.id, { name });
@@ -136,9 +139,31 @@ function BossNameControl({ boss, onChanged }: { boss: AgentCard | undefined; onC
   };
   return (
     <div className="boss-control">
-      <button className="ghost-btn" title="修改老板称呼" onClick={() => void rename()}>
-        老板：{boss.name} · 修改称呼
-      </button>
+      {editing ? (
+        <input
+          className="boss-edit"
+          value={draft}
+          autoFocus
+          placeholder="老板的称呼"
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void rename();
+            if (e.key === "Escape") setEditing(false);
+          }}
+          onBlur={() => void rename()}
+        />
+      ) : (
+        <button
+          className="ghost-btn"
+          title="修改老板称呼"
+          onClick={() => {
+            setDraft(boss.name);
+            setEditing(true);
+          }}
+        >
+          老板：{boss.name} · 修改称呼
+        </button>
+      )}
       {error && <span className="boss-error">{error}</span>}
     </div>
   );
@@ -386,6 +411,23 @@ function AgentBadge({
   const [busy, setBusy] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [dossierOpen, setDossierOpen] = useState(false);
+  const [newRoleOpen, setNewRoleOpen] = useState(false);
+  const [newRoleName, setNewRoleName] = useState("");
+  const [newRoleDesc, setNewRoleDesc] = useState("");
+
+  const createRoleInline = async () => {
+    if (!newRoleName.trim()) return;
+    try {
+      const role = await api.createRole(newRoleName.trim(), newRoleDesc.trim() || undefined);
+      setRoleId(role.id);
+      setNewRoleOpen(false);
+      setNewRoleName("");
+      setNewRoleDesc("");
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
 
   const save = async () => {
     try {
@@ -540,20 +582,33 @@ function AgentBadge({
               <button
                 className="ghost-btn sm"
                 title="新建职位"
-                onClick={async () => {
-                  const rn = window.prompt("新职位名（如 测试 / git 库管理 / 架构分析）");
-                  if (!rn?.trim()) return;
-                  const desc = window.prompt("职位说明（可选，回车跳过）") ?? undefined;
-                  try {
-                    const role = await api.createRole(rn.trim(), desc?.trim() || undefined);
-                    setRoleId(role.id);
-                    onChanged();
-                  } catch (e) {
-                    setError(e instanceof Error ? e.message : String(e));
-                  }
-                }}
+                onClick={() => setNewRoleOpen((v) => !v)}
               >
                 ＋职位
+              </button>
+            </div>
+          )}
+          {agent.kind !== "user" && newRoleOpen && (
+            <div className="role-new">
+              <input
+                placeholder="新职位名（如 测试 / git 库管理）"
+                value={newRoleName}
+                autoFocus
+                onChange={(e) => setNewRoleName(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && void createRoleInline()}
+              />
+              <input
+                placeholder="职位说明（可选）"
+                value={newRoleDesc}
+                onChange={(e) => setNewRoleDesc(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && void createRoleInline()}
+              />
+              <button
+                className="primary-btn sm"
+                disabled={!newRoleName.trim()}
+                onClick={() => void createRoleInline()}
+              >
+                建职位
               </button>
             </div>
           )}

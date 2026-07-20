@@ -3127,3 +3127,51 @@ button:focus-visible {
   color: #8a93a6;
   margin: 0;
 }
+
+/* AI 生成形象：提示词输入 */
+.px-gen {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.px-gen textarea {
+  background: #0f131b;
+  border: 1px solid var(--border, #2a2f3a);
+  color: var(--text, #d8dee9);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  resize: vertical;
+  font-family: inherit;
+}
+
+.px-gen button {
+  align-self: flex-start;
+}
+
+/* 内联新建职位小表单 */
+.role-new {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px dashed var(--border, #2a2f3a);
+  border-radius: 8px;
+}
+
+.role-new button {
+  align-self: flex-start;
+}
+
+/* 老板称呼内联编辑 */
+.boss-edit {
+  background: var(--panel, #161a22);
+  border: 1px solid var(--border, #2a2f3a);
+  color: var(--text, #d8dee9);
+  border-radius: 8px;
+  padding: 5px 10px;
+  font-size: 12.5px;
+  width: 150px;
+}
