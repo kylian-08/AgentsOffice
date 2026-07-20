@@ -19,6 +19,7 @@ import type {
 } from "@agent-office/protocol";
 import { api, type Health, type OfficeState, type TerminalPane } from "./api";
 import { ShellBoard } from "./ShellBoard";
+import { PixelOffice } from "./PixelOffice";
 
 const STATUS_LABELS: Record<string, string> = {
   online: "在席",
@@ -103,10 +104,16 @@ function avatarText(name: string): string {
 }
 
 function Avatar({ agent, status }: { agent: Pick<AgentCard, "name" | "kind" | "meta">; status?: string }) {
-  const svg = (agent.meta as AgentMeta).avatarSvg;
+  const m = agent.meta as AgentMeta;
   return (
     <span className={`avatar kind-${agent.kind} ${status ? `st-${status}` : ""}`} aria-hidden>
-      {svg ? <span className="avatar-art" dangerouslySetInnerHTML={{ __html: svg }} /> : avatarText(agent.name)}
+      {m.spriteUrl ? (
+        <img className="avatar-img" src={m.spriteUrl} alt={agent.name} />
+      ) : m.avatarSvg ? (
+        <span className="avatar-art" dangerouslySetInnerHTML={{ __html: m.avatarSvg }} />
+      ) : (
+        avatarText(agent.name)
+      )}
     </span>
   );
 }
@@ -667,10 +674,11 @@ function AgentBadge({
 
 // ---------- 新建托管工位 ----------
 
-function NewAgentForm({ onDone }: { onDone: () => void }) {
+function NewAgentForm({ onDone, onOpenShell }: { onDone: () => void; onOpenShell: () => void }) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [kind, setKind] = useState<"codex" | "cursor" | "claude">("codex");
+  const [form, setForm] = useState<"managed" | "terminal">("managed");
   const [workspace, setWorkspace] = useState("");
   const [model, setModel] = useState("");
   const [sandbox, setSandbox] = useState<"read-only" | "workspace-write">("read-only");
@@ -680,15 +688,31 @@ function NewAgentForm({ onDone }: { onDone: () => void }) {
   if (!open) {
     return (
       <button className="add-desk" onClick={() => setOpen(true)}>
-        ＋ 新建托管工位
+        ＋ 新建工位
       </button>
     );
   }
+
+  const terminalForm = form === "terminal" && kind !== "cursor";
 
   const submit = async () => {
     setBusy(true);
     setError("");
     try {
+      if (terminalForm) {
+        // 终端形态：在「本机终端」开一个交互式 CLI，会话经 hooks/notify 自动入驻办公室
+        await api.shellTermCreate({
+          shell: "powershell",
+          command: kind as "codex" | "claude",
+          cwd: workspace.trim() || undefined,
+          title: name.trim() || undefined,
+        });
+        setOpen(false);
+        setName("");
+        setWorkspace("");
+        onOpenShell();
+        return;
+      }
       await api.createManagedAgent({
         name: name.trim(),
         kind,
@@ -710,38 +734,55 @@ function NewAgentForm({ onDone }: { onDone: () => void }) {
 
   return (
     <div className="new-agent-form">
-      <h4>新建托管工位</h4>
+      <h4>新建工位</h4>
       <input
-        placeholder="工号（如 codex-研发）"
+        placeholder={terminalForm ? "终端标题（可选）" : "工号（如 codex-研发）"}
         value={name}
         autoFocus
         onChange={(e) => setName(e.target.value)}
       />
       <select value={kind} onChange={(e) => setKind(e.target.value as any)}>
-        <option value="codex">Codex 托管</option>
-        <option value="claude">Claude 托管</option>
-        <option value="cursor">Cursor 托管（需 API Key）</option>
+        <option value="codex">Codex</option>
+        <option value="claude">Claude</option>
+        <option value="cursor">Cursor（需 API Key）</option>
       </select>
+      {kind !== "cursor" && (
+        <select value={form} onChange={(e) => setForm(e.target.value as any)} title="工位形态">
+          <option value="managed">托管形态：后台自动执行，@消息即干活</option>
+          <option value="terminal">终端形态：在「本机终端」开交互 CLI，可随时手动干预</option>
+        </select>
+      )}
       <input
         placeholder="工作目录（可选）"
         value={workspace}
         onChange={(e) => setWorkspace(e.target.value)}
       />
-      <input
-        placeholder="模型备注（可选）"
-        value={model}
-        onChange={(e) => setModel(e.target.value)}
-      />
-      {kind !== "cursor" && (
+      {!terminalForm && (
+        <input
+          placeholder="模型备注（可选）"
+          value={model}
+          onChange={(e) => setModel(e.target.value)}
+        />
+      )}
+      {kind !== "cursor" && !terminalForm && (
         <select value={sandbox} onChange={(e) => setSandbox(e.target.value as any)}>
           <option value="read-only">只读沙箱（更安全）</option>
           <option value="workspace-write">可写工作区</option>
         </select>
       )}
+      {terminalForm && (
+        <p className="form-hint">
+          终端里的 {kind} 完成第一轮对话后会自动出现在花名册（经 hooks / notify 登记）。
+        </p>
+      )}
       {error && <div className="form-error">{error}</div>}
       <div className="form-actions">
-        <button className="primary-btn sm" disabled={busy || !name.trim()} onClick={submit}>
-          {busy ? "创建中…" : "创建"}
+        <button
+          className="primary-btn sm"
+          disabled={busy || (!terminalForm && !name.trim())}
+          onClick={submit}
+        >
+          {busy ? "创建中…" : terminalForm ? "开终端" : "创建"}
         </button>
         <button className="ghost-btn" onClick={() => setOpen(false)}>
           取消
@@ -1528,12 +1569,15 @@ function ChannelBar({
   const clear = async () => {
     const label =
       channel === "hall" ? "大群" : `#${groups.find((g) => g.id === channel)?.name ?? "频道"}`;
-    if (!window.confirm(`清空${label}的全部消息？此操作不可恢复（事件、简报、职位档案笔记不受影响）。`)) {
+    if (!window.confirm(`清空${label}的全部消息？此操作不可恢复（简报、职位档案笔记不受影响）。`)) {
       return;
     }
+    const includeEvents = window.confirm("是否连操作记录（事件时间线）一起清空？\n确定 = 一起清，取消 = 只清消息");
     try {
-      const { cleared } = await api.clearChannel(channel);
-      window.alert(`已清空 ${cleared} 条消息`);
+      const { cleared, clearedEvents } = await api.clearChannel(channel, includeEvents);
+      window.alert(
+        `已清空 ${cleared} 条消息${includeEvents ? `、${clearedEvents ?? 0} 条操作记录` : ""}`,
+      );
       onChanged();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -1611,6 +1655,16 @@ function Feed({ state, channel }: { state: OfficeState; channel: string }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const atBottomRef = useRef(true);
   const [hasNew, setHasNew] = useState(false);
+  const [showEvents, setShowEvents] = useState(
+    () => localStorage.getItem("office.showEvents") !== "0",
+  );
+
+  const toggleEvents = () => {
+    setShowEvents((v) => {
+      localStorage.setItem("office.showEvents", v ? "0" : "1");
+      return !v;
+    });
+  };
 
   const bossName = useMemo(
     () => state.agents.find((a) => a.kind === "user")?.name ?? "老板",
@@ -1668,7 +1722,7 @@ function Feed({ state, channel }: { state: OfficeState; channel: string }) {
         ),
       });
     }
-    for (const e of state.events) {
+    for (const e of showEvents ? state.events : []) {
       if (groupMemberIds && (!e.agentId || !groupMemberIds.has(e.agentId))) continue;
       list.push({
         key: `e-${e.id}`,
@@ -1689,7 +1743,7 @@ function Feed({ state, channel }: { state: OfficeState; channel: string }) {
       });
     }
     return list.sort((a, b) => a.at - b.at).slice(-150);
-  }, [state, bossName, channel]);
+  }, [state, bossName, channel, showEvents]);
 
   // 智能滚动：贴底时跟随新消息；用户上翻时不打扰，改为「回到最新」提示
   useEffect(() => {
@@ -1734,6 +1788,13 @@ function Feed({ state, channel }: { state: OfficeState; channel: string }) {
           ↓ 有新动态
         </button>
       )}
+      <button
+        className={`feed-events-toggle ${showEvents ? "" : "off"}`}
+        title={showEvents ? "隐藏操作记录（事件时间线）" : "显示操作记录（事件时间线）"}
+        onClick={toggleEvents}
+      >
+        {showEvents ? "👁 操作记录" : "🚫 操作记录"}
+      </button>
     </div>
   );
 }
@@ -2075,9 +2136,9 @@ export function App() {
   const [state, setState] = useState<OfficeState | null>(null);
   const [health, setHealth] = useState<Health | null>(null);
   const [mentionPrefill, setMentionPrefill] = useState("");
-  const [view, setView] = useState<"office" | "live" | "terminal" | "shell" | "logs" | "kb">(
-    "office",
-  );
+  const [view, setView] = useState<
+    "office" | "pixel" | "live" | "terminal" | "shell" | "logs" | "kb"
+  >("office");
   const [channel, setChannel] = useState("hall");
   const [onboardOpen, setOnboardOpen] = useState(false);
   const refreshTimer = useRef<number | null>(null);
@@ -2164,6 +2225,14 @@ export function App() {
           </button>
           <button
             role="tab"
+            aria-selected={view === "pixel"}
+            className={view === "pixel" ? "active" : ""}
+            onClick={() => setView("pixel")}
+          >
+            像素办公室
+          </button>
+          <button
+            role="tab"
             aria-selected={view === "live"}
             className={view === "live" ? "active" : ""}
             onClick={() => setView("live")}
@@ -2222,7 +2291,11 @@ export function App() {
         </div>
       </header>
 
-      {view === "live" ? (
+      {view === "pixel" ? (
+        <main className="pixel-main">
+          <PixelOffice state={state} onChanged={refresh} />
+        </main>
+      ) : view === "live" ? (
         <main className="live-main">
           <LiveBoard state={state} />
         </main>
@@ -2269,7 +2342,7 @@ export function App() {
                   />
                 ))}
               </div>
-              <NewAgentForm onDone={refresh} />
+              <NewAgentForm onDone={refresh} onOpenShell={() => setView("shell")} />
             </section>
           </aside>
 

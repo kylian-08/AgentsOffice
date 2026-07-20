@@ -477,17 +477,30 @@ export class OfficeService {
     return { ok: true, noteId: note.id };
   }
 
-  /** 清空某频道的全部消息（大群或项目组频道） */
-  clearChannel(channel: string): { ok: boolean; error?: string; cleared?: number } {
+  /** 清空某频道的全部消息（大群或项目组频道）；可连操作记录（事件时间线）一起清 */
+  clearChannel(
+    channel: string,
+    opts?: { includeEvents?: boolean },
+  ): { ok: boolean; error?: string; cleared?: number; clearedEvents?: number } {
     if (channel !== HALL_CHANNEL && !this.store.getGroupById(channel)) {
       return { ok: false, error: "频道不存在" };
     }
     const cleared = this.store.clearChannelMessages(channel);
+    let clearedEvents = 0;
+    if (opts?.includeEvents) {
+      clearedEvents =
+        channel === HALL_CHANNEL
+          ? this.store.clearEvents()
+          : this.store.clearEvents(this.store.groupMembers(channel).map((a) => a.id));
+    }
     const label =
       channel === HALL_CHANNEL ? "大群" : `#${this.store.getGroupById(channel)?.name}`;
-    this.event({ type: "channel", text: `${label} 的 ${cleared} 条消息已清空` });
+    this.event({
+      type: "channel",
+      text: `${label} 的 ${cleared} 条消息已清空${opts?.includeEvents ? `（连同 ${clearedEvents} 条操作记录）` : ""}`,
+    });
     this.emit("message", {});
-    return { ok: true, cleared };
+    return { ok: true, cleared, clearedEvents };
   }
 
   // ---------- Agent 管理 ----------

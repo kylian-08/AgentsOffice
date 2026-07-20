@@ -118,10 +118,10 @@ export const api = {
     fetch(`/api/roles/${roleId}/notes/${noteId}`, { method: "DELETE" }).then((r) =>
       json<{ ok: boolean }>(r),
     ),
-  clearChannel: (channel: string) =>
-    fetch(`/api/channels/${channel}/messages`, { method: "DELETE" }).then((r) =>
-      json<{ ok: boolean; cleared: number }>(r),
-    ),
+  clearChannel: (channel: string, includeEvents = false) =>
+    fetch(`/api/channels/${channel}/messages${includeEvents ? "?events=1" : ""}`, {
+      method: "DELETE",
+    }).then((r) => json<{ ok: boolean; cleared: number; clearedEvents?: number }>(r)),
   createTask: (title: string, description: string, assignee: string | null) =>
     fetch("/api/tasks", {
       method: "POST",
@@ -154,6 +154,7 @@ export const api = {
       title?: string;
       groupIds?: string[];
       roleId?: string | null;
+      spriteUrl?: string;
     },
   ) =>
     fetch(`/api/agents/${id}`, {
@@ -247,7 +248,12 @@ export const api = {
         home: string;
       }>(r),
     ),
-  shellTermCreate: (input: { shell?: string; cwd?: string; title?: string }) =>
+  shellTermCreate: (input: {
+    shell?: string;
+    cwd?: string;
+    title?: string;
+    command?: "codex" | "claude";
+  }) =>
     fetch("/api/shellterms", {
       method: "POST",
       headers: { "content-type": "application/json" },

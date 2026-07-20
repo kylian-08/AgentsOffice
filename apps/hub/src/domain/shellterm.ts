@@ -57,6 +57,8 @@ export class ShellTerminalManager {
     cols?: number;
     rows?: number;
     title?: string;
+    /** 直接在终端里启动的 Agent CLI（codex / claude），会话经 hooks/notify 自动入驻办公室 */
+    command?: "codex" | "claude";
   }): Promise<{ ok: true; info: ShellTermInfo } | { ok: false; error: string }> {
     const aliveCount = [...this.sessions.values()].filter((s) => s.info.alive).length;
     if (aliveCount >= MAX_SESSIONS) {
@@ -74,6 +76,12 @@ export class ShellTerminalManager {
           : process.platform === "win32"
             ? "powershell.exe"
             : (process.env.SHELL ?? "bash");
+    // Agent CLI 在 shell 里启动：CLI 退出后终端还在，能看到报错
+    const args: string[] = [];
+    if (opts.command === "codex" || opts.command === "claude") {
+      if (shell === "cmd.exe") args.push("/k", opts.command);
+      else args.push("-NoLogo", "-NoExit", "-Command", opts.command);
+    }
     const cwd = opts.cwd && opts.cwd.trim().length > 0 ? opts.cwd.trim() : homedir();
     const cols = opts.cols ?? 100;
     const rows = opts.rows ?? 30;
@@ -91,7 +99,7 @@ export class ShellTerminalManager {
     };
     let pty: PtyLike;
     try {
-      pty = nodePty.spawn(shell, [], {
+      pty = nodePty.spawn(shell, args, {
         name: "xterm-256color",
         cols,
         rows,
@@ -106,7 +114,9 @@ export class ShellTerminalManager {
     }
     const info: ShellTermInfo = {
       id: uuid(),
-      title: opts.title?.trim() || `${shell.replace(".exe", "")} · ${this.sessions.size + 1}`,
+      title:
+        opts.title?.trim() ||
+        `${opts.command ?? shell.replace(".exe", "")} · ${this.sessions.size + 1}`,
       shell,
       cwd,
       cols,

@@ -167,6 +167,8 @@ export interface AgentMeta {
   roleId?: string;
   /** 头像 SVG（codex 生成或本地几何头像） */
   avatarSvg?: string;
+  /** 人物形象图（上传到 /files/ 的 URL；像素办公室和头像优先用它） */
+  spriteUrl?: string;
   threadId?: string;
   sessionId?: string;
   cursorAgentId?: string;

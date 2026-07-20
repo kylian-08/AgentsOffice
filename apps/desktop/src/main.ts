@@ -2,7 +2,7 @@ import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { BrowserWindow, app, shell } from "electron";
+import { BrowserWindow, app, session, shell } from "electron";
 
 const OFFICE_HOME = join(homedir(), ".agent-office");
 
@@ -134,6 +134,14 @@ if (!gotLock) {
   });
 
   void app.whenReady().then(async () => {
+    // 内嵌终端要像外部终端一样能复制粘贴：放开剪贴板读写权限
+    const clipboardPerms = new Set(["clipboard-read", "clipboard-sanitized-write"]);
+    session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
+      callback(clipboardPerms.has(permission));
+    });
+    session.defaultSession.setPermissionCheckHandler((_wc, permission) =>
+      clipboardPerms.has(permission),
+    );
     const port = readPort();
     // 已有 hub 在跑（比如命令行启动的）就直接连，退出时也不去杀它
     if (!(await healthy(port))) {

@@ -567,6 +567,17 @@ export class OfficeStore {
     return rows.map((r) => this.briefFromRow(r));
   }
 
+  /** 清空操作记录（事件时间线）：不传 agentIds 清全部，传了只清这些成员的 */
+  clearEvents(agentIds?: string[]): number {
+    if (!agentIds) {
+      return Number(this.db.prepare("DELETE FROM events").run().changes);
+    }
+    const stmt = this.db.prepare("DELETE FROM events WHERE agent_id = ?");
+    let count = 0;
+    for (const id of agentIds) count += Number(stmt.run(id).changes);
+    return count;
+  }
+
   /** 清空某频道的全部消息（含投递状态；岗位档案里的消息索引一并清理） */
   clearChannelMessages(channel: string): number {
     const ids = (

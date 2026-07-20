@@ -124,6 +124,48 @@ function XtermPane({ term }: { term: ShellTermInfo }) {
 
     const ws = shellTermSocket(term.id);
     let closed = false;
+
+    // 剪贴板体验对齐外部终端：
+    // Ctrl+V / 右键空白处 = 粘贴；Ctrl+C 有选中 = 复制（无选中仍是中断信号）；右键选中 = 复制
+    const pasteFromClipboard = async () => {
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text) {
+          xterm.paste(text); // 走括号粘贴，codex/claude 会当作整段文本
+        } else if (ws.readyState === WebSocket.OPEN) {
+          // 剪贴板里不是文本（可能是截图）：把 Ctrl+V 原样交给 CLI，
+          // codex 等程序会自己读系统剪贴板取图
+          ws.send(JSON.stringify({ type: "in", data: "\x16" }));
+        }
+      } catch {
+        xterm.write("\r\n\x1b[33m[无法读取剪贴板，请检查浏览器剪贴板权限]\x1b[0m\r\n");
+      }
+    };
+    xterm.attachCustomKeyEventHandler((ev) => {
+      if (ev.type !== "keydown") return true;
+      const mod = ev.ctrlKey && !ev.altKey;
+      if (mod && ev.key.toLowerCase() === "v") {
+        void pasteFromClipboard();
+        return false;
+      }
+      if (mod && ev.key.toLowerCase() === "c" && xterm.hasSelection()) {
+        void navigator.clipboard.writeText(xterm.getSelection());
+        xterm.clearSelection();
+        return false;
+      }
+      return true;
+    });
+    const onContextMenu = (e: MouseEvent) => {
+      e.preventDefault();
+      if (xterm.hasSelection()) {
+        void navigator.clipboard.writeText(xterm.getSelection());
+        xterm.clearSelection();
+      } else {
+        void pasteFromClipboard();
+      }
+    };
+    host.addEventListener("contextmenu", onContextMenu);
+
     ws.onopen = () => {
       fit.fit();
       ws.send(JSON.stringify({ type: "resize", cols: xterm.cols, rows: xterm.rows }));
@@ -165,6 +207,7 @@ function XtermPane({ term }: { term: ShellTermInfo }) {
     return () => {
       closed = true;
       observer.disconnect();
+      host.removeEventListener("contextmenu", onContextMenu);
       dataSub.dispose();
       ws.close();
       xterm.dispose();
@@ -200,8 +243,10 @@ export function ShellBoard() {
     setCreating(true);
     setError(null);
     try {
+      const isAgent = shell === "codex" || shell === "claude";
       const info = await api.shellTermCreate({
-        shell,
+        shell: isAgent ? "powershell" : shell,
+        command: isAgent ? (shell as "codex" | "claude") : undefined,
         cwd: cwd.trim() || undefined,
       });
       setTerms((prev) => [...prev, info]);
@@ -255,10 +300,12 @@ export function ShellBoard() {
           ))}
         </div>
         <div className="shell-new">
-          <select value={shell} onChange={(e) => setShell(e.target.value)} title="选择 shell">
+          <select value={shell} onChange={(e) => setShell(e.target.value)} title="选择终端类型">
             <option value="powershell">PowerShell</option>
             <option value="cmd">CMD</option>
             <option value="pwsh">pwsh 7</option>
+            <option value="codex">Codex 工位（自动入驻办公室）</option>
+            <option value="claude">Claude 工位（自动入驻办公室）</option>
           </select>
           <input
             placeholder="启动目录（留空 = 用户主目录）"

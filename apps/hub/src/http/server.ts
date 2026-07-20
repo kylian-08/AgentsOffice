@@ -153,9 +153,13 @@ export async function createServer(
       cols?: number;
       rows?: number;
       title?: string;
+      command?: "codex" | "claude";
     };
     if (body.cwd && !existsSync(body.cwd.trim())) {
       return reply.code(400).send({ error: `启动目录不存在：${body.cwd.trim()}` });
+    }
+    if (body.command && body.command !== "codex" && body.command !== "claude") {
+      return reply.code(400).send({ error: "command 只支持 codex / claude" });
     }
     const result = await shellTerms.create(body);
     if (!result.ok) return reply.code(500).send({ error: result.error });
@@ -304,9 +308,12 @@ export async function createServer(
   // ---------- 清空频道消息 ----------
   app.delete("/api/channels/:channel/messages", async (request, reply) => {
     const { channel } = request.params as { channel: string };
-    const result = office.clearChannel(channel);
+    const query = (request.query ?? {}) as { events?: string };
+    const result = office.clearChannel(channel, {
+      includeEvents: query.events === "1" || query.events === "true",
+    });
     if (!result.ok) return reply.code(404).send({ error: result.error });
-    return { ok: true, cleared: result.cleared };
+    return { ok: true, cleared: result.cleared, clearedEvents: result.clearedEvents };
   });
 
   // ---------- 项目组 ----------
@@ -401,9 +408,19 @@ export async function createServer(
       groupIds?: string[];
       /** 任职职位 ID；null = 卸任 */
       roleId?: string | null;
+      /** 人物形象图 URL（/files/xxx）；空字符串 = 清除 */
+      spriteUrl?: string;
     };
     const agent = office.renameAgent(id, body);
     if (!agent) return reply.code(409).send({ error: "改名失败：Agent 不存在或工号已被占用" });
+    if (body.spriteUrl !== undefined) {
+      const url = String(body.spriteUrl).trim();
+      if (url && !url.startsWith("/files/")) {
+        return reply.code(400).send({ error: "spriteUrl 必须是 /files/ 开头的已上传图片" });
+      }
+      office.store.updateAgentMeta(id, { spriteUrl: url || undefined });
+      office.bus.publish({ type: "agent", payload: { agentId: id } });
+    }
     if (body.groupIds !== undefined) {
       if (!Array.isArray(body.groupIds) || body.groupIds.some((g) => typeof g !== "string")) {
         return reply.code(400).send({ error: "groupIds 必须是字符串数组" });

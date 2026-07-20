@@ -155,3 +155,28 @@ describe("职位与岗位档案交接", () => {
     expect(office.clearChannel("nope").ok).toBe(false);
   });
 });
+
+describe("清空频道连操作记录", () => {
+  it("hall 清空可连全部事件一起清；组频道只清本组成员事件", () => {
+    const office = makeOffice();
+    const group = office.createGroup("画布").group!;
+    const inGroup = office.store.registerAgent({ name: "codex-in", kind: "codex-cli" });
+    const outGroup = office.store.registerAgent({ name: "codex-out", kind: "codex-cli" });
+    office.assignGroups(inGroup.id, [group.id]);
+    office.event({ type: "run", agentId: inGroup.id, text: "组内事件" });
+    office.event({ type: "run", agentId: outGroup.id, text: "组外事件" });
+
+    // 组频道清空：只清组员事件
+    office.sendMessage({ fromName: "老板", text: "组内消息", channel: group.id });
+    const r1 = office.clearChannel(group.id, { includeEvents: true });
+    expect(r1.ok).toBe(true);
+    const remainAgents = office.store.listEvents().filter((e) => e.agentId);
+    expect(remainAgents.some((e) => e.agentId === outGroup.id)).toBe(true);
+    expect(remainAgents.some((e) => e.agentId === inGroup.id && e.text === "组内事件")).toBe(false);
+
+    // hall 清空：全部事件清光
+    const r2 = office.clearChannel("hall", { includeEvents: true });
+    expect(r2.ok).toBe(true);
+    expect(office.store.listEvents().filter((e) => e.type !== "channel")).toHaveLength(0);
+  });
+});
