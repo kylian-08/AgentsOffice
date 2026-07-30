@@ -16,6 +16,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const DESKTOP = join(HERE, "..");
 const HUB = join(DESKTOP, "../hub");
 const WEB_DIST = join(DESKTOP, "../web/dist");
+const HOOKS = join(DESKTOP, "../../hooks");
 const OUT = join(DESKTOP, "dist");
 
 rmSync(OUT, { recursive: true, force: true });
@@ -90,4 +91,5 @@ function copyDir(src, dest) {
   }
 }
 copyDir(WEB_DIST, join(OUT, "resources/web"));
+copyDir(HOOKS, join(OUT, "resources/hooks"));
 console.log("[desktop] bundle 完成 → apps/desktop/dist");

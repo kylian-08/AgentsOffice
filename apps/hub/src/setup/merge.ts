@@ -182,6 +182,14 @@ export interface CodexMergeResult {
   notifySkipped: boolean;
 }
 
+export function getCodexNotifyCommand(existing: string | null): string[] | null {
+  if (!existing?.trim()) return null;
+  const notify = (parseToml(existing) as Record<string, unknown>).notify;
+  return Array.isArray(notify) && notify.every((item) => typeof item === "string")
+    ? [...notify]
+    : null;
+}
+
 /**
  * 合并 ~/.codex/config.toml：
  * - 插入/覆盖 [mcp_servers.agent_office]
@@ -189,7 +197,7 @@ export interface CodexMergeResult {
  */
 export function mergeCodexToml(
   existing: string | null,
-  opts: { mcpUrl: string; notifyCommand: string[] },
+  opts: { mcpUrl: string; notifyCommand: string[]; replaceExistingNotify?: boolean },
 ): CodexMergeResult {
   let doc: Record<string, any> = {};
   if (existing?.trim()) {
@@ -203,7 +211,7 @@ export function mergeCodexToml(
   const isOurs =
     Array.isArray(currentNotify) &&
     currentNotify.some((x: unknown) => typeof x === "string" && x.includes("codex-notify.mjs"));
-  if (currentNotify === undefined || isOurs) {
+  if (currentNotify === undefined || isOurs || opts.replaceExistingNotify) {
     doc.notify = opts.notifyCommand;
   } else {
     notifySkipped = true;
@@ -211,7 +219,10 @@ export function mergeCodexToml(
   return { toml: stringifyToml(doc) + "\n", notifySkipped };
 }
 
-export function removeFromCodexToml(existing: string): string {
+export function removeFromCodexToml(
+  existing: string,
+  loadNotifyChain?: (path: string) => string[] | null,
+): string {
   const doc = parseToml(existing) as Record<string, any>;
   if (doc.mcp_servers) {
     delete doc.mcp_servers.agent_office;
@@ -221,7 +232,12 @@ export function removeFromCodexToml(existing: string): string {
     Array.isArray(doc.notify) &&
     doc.notify.some((x: unknown) => typeof x === "string" && x.includes("codex-notify.mjs"))
   ) {
-    delete doc.notify;
+    const chainPath = doc.notify.find(
+      (item: unknown) => typeof item === "string" && item.endsWith("codex-notify-chain.json"),
+    ) as string | undefined;
+    const previousNotify = chainPath ? loadNotifyChain?.(chainPath) : null;
+    if (previousNotify?.length) doc.notify = previousNotify;
+    else delete doc.notify;
   }
   return stringifyToml(doc) + "\n";
 }

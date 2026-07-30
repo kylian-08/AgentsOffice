@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -18,8 +20,20 @@ import type {
   RoleDossier,
 } from "@agent-office/protocol";
 import { api, type Health, type OfficeState, type TerminalPane } from "./api";
-import { ShellBoard } from "./ShellBoard";
-import { PixelOffice } from "./PixelOffice";
+import {
+  buildMessageFeedback,
+  selectWorkers,
+  sortTerminalsForAction,
+  sortWorkersForAction,
+  visibleTerminals,
+} from "./operability";
+
+const ShellBoard = lazy(() =>
+  import("./ShellBoard").then((module) => ({ default: module.ShellBoard })),
+);
+const PixelOffice = lazy(() =>
+  import("./PixelOffice").then((module) => ({ default: module.PixelOffice })),
+);
 
 const STATUS_LABELS: Record<string, string> = {
   online: "在席",
@@ -320,7 +334,7 @@ function RoleDossierModal({
               <span className="dossier-holder">在岗：{role.holderNames!.join("、")}</span>
             )}
           </h3>
-          <button className="icon-btn" title="关闭" onClick={onClose}>
+          <button className="icon-btn" title="关闭" aria-label="关闭" onClick={onClose}>
             ×
           </button>
         </div>
@@ -543,6 +557,7 @@ function AgentBadge({
             <button
               className="icon-btn dossier-btn"
               title="查看职位档案（笔记 / 历任简报 / 岗位消息，交接时自动继承）"
+              aria-label="查看职位档案"
               onClick={() => setDossierOpen(true)}
             >
               📋
@@ -672,6 +687,7 @@ function AgentBadge({
           <button
             className="icon-btn"
             title={agent.kind === "user" ? "设置老板称呼" : "调整员工资料"}
+            aria-label={agent.kind === "user" ? "设置老板称呼" : `调整 ${agent.name} 的员工资料`}
             onClick={() => {
               setEditing((v) => !v);
               setName(agent.name);
@@ -686,6 +702,7 @@ function AgentBadge({
             <button
               className="icon-btn promote"
               title="唤醒：转为托管工位（沿用原会话续聊），离席积压的消息立即处理"
+              aria-label={`唤醒 ${agent.name} 并转为托管工位`}
               disabled={busy}
               onClick={() => void promote()}
             >
@@ -693,17 +710,17 @@ function AgentBadge({
             </button>
           )}
           {agent.kind !== "user" && agent.kind !== "supervisor" && (
-            <button className="icon-btn" title="对话历史（终端视图）" onClick={() => setHistoryOpen(true)}>
+            <button className="icon-btn" title="对话历史（终端视图）" aria-label={`查看 ${agent.name} 的对话历史`} onClick={() => setHistoryOpen(true)}>
               ≣
             </button>
           )}
           {agent.kind !== "user" && agent.kind !== "supervisor" && (
-            <button className="icon-btn" title="生成员工头像" disabled={busy} onClick={() => void makeAvatar()}>
+            <button className="icon-btn" title="生成员工头像" aria-label={`生成 ${agent.name} 的头像`} disabled={busy} onClick={() => void makeAvatar()}>
               ◉
             </button>
           )}
           {agent.kind !== "user" && agent.kind !== "supervisor" && (
-            <button className="icon-btn danger" title="移出员工" disabled={busy} onClick={() => void remove()}>
+            <button className="icon-btn danger" title="移出员工" aria-label={`移出员工 ${agent.name}`} disabled={busy} onClick={() => void remove()}>
               ×
             </button>
           )}
@@ -876,15 +893,59 @@ const ONBOARD_TABS = [
   },
 ] as const;
 
-function OnboardModal({ onClose }: { onClose: () => void }) {
-  const [tab, setTab] = useState<string>("cursor");
+type OnboardTabId = (typeof ONBOARD_TABS)[number]["id"];
+
+const INTEGRATION_CHECK_LABELS: Record<
+  OnboardTabId,
+  { runtime: string; hook: string; instructions: string }
+> = {
+  cursor: { runtime: "Cursor", hook: "Hooks", instructions: "会话规则" },
+  codex: { runtime: "Codex CLI", hook: "Notify", instructions: "协作协议" },
+  claude: { runtime: "Claude CLI", hook: "Hooks", instructions: "会话规则" },
+};
+
+function OnboardModal({
+  health,
+  initialTab,
+  onHealthChanged,
+  onClose,
+}: {
+  health: Health | null;
+  initialTab: OnboardTabId;
+  onHealthChanged: (health: Health) => void;
+  onClose: () => void;
+}) {
+  const [tab, setTab] = useState<OnboardTabId>(initialTab);
   const [copied, setCopied] = useState(false);
+  const [repairing, setRepairing] = useState(false);
+  const [repairError, setRepairError] = useState("");
   const current = ONBOARD_TABS.find((t) => t.id === tab)!;
+  const integration = health?.integrations?.[tab];
+  const labels = INTEGRATION_CHECK_LABELS[tab];
 
   const copy = async () => {
     await navigator.clipboard.writeText(current.prompt);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const repair = async () => {
+    if (
+      !window.confirm(
+        `修复 ${current.label} 接入会更新其用户级 MCP/Hook 配置，并为变更的原文件创建备份。确认继续？`,
+      )
+    ) {
+      return;
+    }
+    setRepairing(true);
+    setRepairError("");
+    try {
+      onHealthChanged(await api.repairIntegration(tab));
+    } catch (error) {
+      setRepairError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRepairing(false);
+    }
   };
 
   useEffect(() => {
@@ -907,13 +968,59 @@ function OnboardModal({ onClose }: { onClose: () => void }) {
             <button
               key={t.id}
               className={tab === t.id ? "active" : ""}
-              onClick={() => setTab(t.id)}
+              onClick={() => {
+                setTab(t.id);
+                setCopied(false);
+                setRepairError("");
+              }}
             >
               {t.label}
             </button>
           ))}
         </nav>
         <div className="modal-body">
+          <section
+            className={`integration-status ${integration ? (integration.ready ? "ready" : "needs-action") : "pending"}`}
+          >
+            <div className="integration-status-head">
+              <strong>
+                {!integration
+                  ? "接入状态尚未加载"
+                  : integration.ready
+                    ? "接入完整，可正常协作"
+                    : "接入未完成"}
+              </strong>
+              <span>{!integration ? "未加载" : integration.ready ? "可用" : "需修复"}</span>
+            </div>
+            {integration ? (
+              <ul className="integration-checks">
+                {integration.runtimeAvailable !== null && (
+                  <li className={integration.runtimeAvailable ? "ok" : "bad"}>
+                    {labels.runtime}
+                  </li>
+                )}
+                <li className={integration.mcpConfigured ? "ok" : "bad"}>MCP</li>
+                <li className={integration.hookConfigured ? "ok" : "bad"}>{labels.hook}</li>
+                {integration.instructionsConfigured !== null && (
+                  <li className={integration.instructionsConfigured ? "ok" : "bad"}>
+                    {labels.instructions}
+                  </li>
+                )}
+              </ul>
+            ) : (
+              <p className="modal-note">正在读取接入状态。</p>
+            )}
+            {integration && !integration.ready && (
+              <button
+                className="repair-btn"
+                disabled={repairing}
+                onClick={() => void repair()}
+              >
+                {repairing ? "修复中…" : `修复 ${current.label} 接入`}
+              </button>
+            )}
+            {repairError && <p className="form-error">修复失败：{repairError}</p>}
+          </section>
           <p>{current.intro}</p>
           <blockquote className="copy-block">{current.prompt}</blockquote>
           <button className="primary-btn" onClick={() => void copy()}>
@@ -974,7 +1081,13 @@ function Composer({
   }, [prefill]);
 
   const names = useMemo(
-    () => agents.filter((a) => a.kind !== "user").map((a) => a.name),
+    () => [
+      SUPERVISOR_NAME,
+      ...sortWorkersForAction(
+        agents.filter((a) => a.kind !== "user" && a.kind !== "supervisor"),
+        [],
+      ).map((a) => a.name),
+    ],
     [agents],
   );
 
@@ -1003,14 +1116,7 @@ function Composer({
     if ((!text.trim() && images.length === 0) || uploading) return;
     try {
       const result = await api.sendMessage(text.trim(), channel, images);
-      const managed = result.routed.filter((r) => r.mode === "managed").map((r) => r.name);
-      const inbox = result.routed.filter((r) => r.mode === "inbox").map((r) => r.name);
-      const supervisor = result.routed.some((r) => r.mode === "supervisor");
-      const parts: string[] = [];
-      if (supervisor) parts.push("主管已接单并自动分派");
-      if (managed.length > 0) parts.push(`已唤醒 ${managed.join("、")}`);
-      if (inbox.length > 0) parts.push(`已入 ${inbox.join("、")} 的收件箱（下轮读取）`);
-      setHint({ text: parts.join("；") || "已发送", kind: "ok" });
+      setHint(buildMessageFeedback(result));
       setText("");
       setImages([]);
       onSent();
@@ -1040,7 +1146,14 @@ function Composer({
           ))}
         </ul>
       )}
-      {hint && <div className={`composer-toast ${hint.kind}`}>{hint.text}</div>}
+      {hint && (
+        <div
+          className={`composer-toast ${hint.kind}`}
+          role={hint.kind === "err" ? "alert" : "status"}
+        >
+          {hint.text}
+        </div>
+      )}
       {images.length > 0 && (
         <div className="composer-images">
           {images.map((url) => (
@@ -1072,6 +1185,7 @@ function Composer({
         <button
           className="attach-btn"
           title="添加图片（也可以直接粘贴/拖入）"
+          aria-label="添加图片"
           disabled={uploading}
           onClick={() => fileRef.current?.click()}
         >
@@ -1199,7 +1313,9 @@ function BriefCard({ brief }: { brief: OfficeBrief }) {
 
 function BriefWall({ briefs }: { briefs: OfficeBrief[] }) {
   const [filter, setFilter] = useState("");
-  const shown = filter ? briefs.filter((b) => b.agentName === filter) : briefs;
+  const [expanded, setExpanded] = useState(false);
+  const matching = filter ? briefs.filter((b) => b.agentName === filter) : briefs;
+  const shown = expanded ? matching : matching.slice(0, 8);
   const authors = useMemo(
     () => [...new Set(briefs.map((b) => b.agentName))],
     [briefs],
@@ -1211,7 +1327,10 @@ function BriefWall({ briefs }: { briefs: OfficeBrief[] }) {
         <select
           className="brief-filter"
           value={filter}
-          onChange={(e) => setFilter(e.target.value)}
+          onChange={(e) => {
+            setFilter(e.target.value);
+            setExpanded(false);
+          }}
           aria-label="按成员筛选简报"
         >
           <option value="">全部成员（{briefs.length}）</option>
@@ -1229,6 +1348,11 @@ function BriefWall({ briefs }: { briefs: OfficeBrief[] }) {
         {shown.map((brief) => (
           <BriefCard key={brief.id} brief={brief} />
         ))}
+        {matching.length > 8 && (
+          <button className="brief-more" onClick={() => setExpanded((value) => !value)}>
+            {expanded ? "收起历史简报" : `查看其余 ${matching.length - 8} 条`}
+          </button>
+        )}
       </div>
     </section>
   );
@@ -1238,10 +1362,12 @@ function BriefWall({ briefs }: { briefs: OfficeBrief[] }) {
 
 function DispatchForm({
   agents,
+  tasks,
   onDone,
   onClose,
 }: {
   agents: AgentCard[];
+  tasks: OfficeTask[];
   onDone: () => void;
   onClose: () => void;
 }) {
@@ -1249,7 +1375,15 @@ function DispatchForm({
   const [description, setDescription] = useState("");
   const [chosen, setChosen] = useState<string[]>([]);
   const [hint, setHint] = useState("");
-  const workers = agents.filter((a) => a.kind !== "user" && a.kind !== "supervisor");
+  const [showOffline, setShowOffline] = useState(false);
+  const workers = sortWorkersForAction(
+    agents.filter((a) => a.kind !== "user" && a.kind !== "supervisor"),
+    tasks,
+  );
+  const offlineCount = workers.filter((agent) => agent.status === "offline").length;
+  const shownWorkers = showOffline
+    ? workers
+    : workers.filter((agent) => agent.status !== "offline");
 
   const toggle = (name: string) => {
     setChosen((prev) =>
@@ -1298,7 +1432,7 @@ function DispatchForm({
           {chosen.length === 0 ? "不选成员 = 主管自动挑人" : `指定 ${chosen.length} 位成员：`}
         </span>
         <div className="dispatch-chips">
-          {workers.map((a) => (
+          {shownWorkers.map((a) => (
             <button
               key={a.id}
               className={`chip-toggle ${chosen.includes(a.name) ? "on" : ""} ${a.status === "offline" ? "off-agent" : ""}`}
@@ -1308,6 +1442,11 @@ function DispatchForm({
               {a.name}
             </button>
           ))}
+          {offlineCount > 0 && (
+            <button className="chip-toggle history" onClick={() => setShowOffline((value) => !value)}>
+              {showOffline ? "隐藏离线成员" : `显示离线成员 ${offlineCount}`}
+            </button>
+          )}
         </div>
       </div>
       {hint && <div className="dispatch-hint">{hint}</div>}
@@ -1335,12 +1474,30 @@ function TaskPanel({
   onChanged: () => void;
 }) {
   const [dispatchOpen, setDispatchOpen] = useState(false);
-  const assignable = agents.filter((a) => a.kind !== "user" && a.kind !== "supervisor");
+  const [error, setError] = useState("");
+  const assignable = sortWorkersForAction(
+    agents.filter((a) => a.kind !== "user" && a.kind !== "supervisor"),
+    tasks,
+  );
   const active = tasks.filter((t) => t.status !== "done" && t.status !== "cancelled");
   const closed = tasks.filter((t) => t.status === "done" || t.status === "cancelled");
 
-  const renderTask = (task: OfficeTask) => (
-    <li key={task.id} className={`task task-${task.status}`}>
+  const update = async (taskId: string, patch: { status?: string; assignee?: string | null }) => {
+    try {
+      await api.updateTask(taskId, patch);
+      setError("");
+      onChanged();
+    } catch (updateError) {
+      setError(updateError instanceof Error ? updateError.message : String(updateError));
+    }
+  };
+
+  const renderTask = (task: OfficeTask) => {
+    const assignee = agents.find((agent) => agent.id === task.assigneeAgentId);
+    const blocked =
+      task.status !== "done" && task.status !== "cancelled" && assignee?.status === "offline";
+    return (
+    <li key={task.id} className={`task task-${task.status} ${blocked ? "task-blocked" : ""}`}>
       <div className="task-main">
         <span className="task-title">{task.title}</span>
         <span className={`task-status s-${task.status}`}>
@@ -1349,21 +1506,21 @@ function TaskPanel({
       </div>
       <div className="task-meta">
         <select
+          aria-label={`设置任务“${task.title}”的负责人`}
           value={task.assigneeName ?? ""}
-          onChange={(e) =>
-            api.updateTask(task.id, { assignee: e.target.value || null }).then(onChanged)
-          }
+          onChange={(e) => void update(task.id, { assignee: e.target.value || null })}
         >
           <option value="">未分派</option>
           {assignable.map((a) => (
             <option key={a.id} value={a.name}>
-              {a.name}
+              {a.name}{a.status === "offline" ? " · 离线" : ""}
             </option>
           ))}
         </select>
         <select
+          aria-label={`设置任务“${task.title}”的状态`}
           value={task.status}
-          onChange={(e) => api.updateTask(task.id, { status: e.target.value }).then(onChanged)}
+          onChange={(e) => void update(task.id, { status: e.target.value })}
         >
           {Object.entries(TASK_STATUS_LABELS).map(([value, label]) => (
             <option key={value} value={value}>
@@ -1372,8 +1529,10 @@ function TaskPanel({
           ))}
         </select>
       </div>
+      {blocked && <div className="task-warning">负责人离线，任务正在等待其下次上线</div>}
     </li>
-  );
+    );
+  };
 
   return (
     <section className="panel panel-tasks">
@@ -1389,8 +1548,14 @@ function TaskPanel({
         )}
       </div>
       {dispatchOpen && (
-        <DispatchForm agents={agents} onDone={onChanged} onClose={() => setDispatchOpen(false)} />
+        <DispatchForm
+          agents={agents}
+          tasks={tasks}
+          onDone={onChanged}
+          onClose={() => setDispatchOpen(false)}
+        />
       )}
+      {error && <p className="form-error">任务更新失败：{error}</p>}
       <ul className="task-list">
         {tasks.length === 0 && <li className="empty">暂无任务。点「分派工作」交给主管拆解。</li>}
         {active.map(renderTask)}
@@ -1525,22 +1690,54 @@ function EmployeeCardModal({
 
 function LiveBoard({ state }: { state: OfficeState }) {
   const [detailId, setDetailId] = useState<string | null>(null);
-  const workers = state.agents.filter((a) => a.kind !== "user" && a.kind !== "supervisor");
+  const [query, setQuery] = useState("");
+  const [showArchived, setShowArchived] = useState(false);
+  const selection = useMemo(
+    () =>
+      selectWorkers({
+        agents: state.agents,
+        tasks: state.tasks,
+        query,
+        showArchived,
+      }),
+    [state.agents, state.tasks, query, showArchived],
+  );
+  const workers = selection.visible;
+  const allWorkers = state.agents.filter(
+    (agent) => agent.kind !== "user" && agent.kind !== "supervisor",
+  );
   const activeTasks = state.tasks.filter(
     (t) => t.status === "claimed" || t.status === "in_progress",
   );
-  const busyCount = workers.filter((a) => a.status === "busy").length;
-  const detailAgent = workers.find((a) => a.id === detailId) ?? null;
+  const busyCount = allWorkers.filter((a) => a.status === "busy").length;
+  const detailAgent = allWorkers.find((a) => a.id === detailId) ?? null;
   return (
     <div className="live-wrap">
       <div className="live-summary">
         <span>
-          {workers.length} 位成员 · <em className="busy-count">{busyCount}</em> 位工作中
+          当前显示 {workers.length}/{selection.totalCount} · <em className="busy-count">{busyCount}</em> 位工作中
         </span>
+        <div className="operability-toolbar compact">
+          <input
+            type="search"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="搜索成员"
+            aria-label="搜索实时工作台成员"
+          />
+          {selection.archivedCount > 0 && (
+            <button
+              className={showArchived ? "active" : ""}
+              onClick={() => setShowArchived((value) => !value)}
+            >
+              {showArchived ? "只看当前" : `历史 ${selection.archivedCount}`}
+            </button>
+          )}
+        </div>
       </div>
       <div className="live-board">
         {workers.length === 0 && (
-          <p className="empty">还没有成员入驻，先从右上角「接入 Agent」开始。</p>
+          <p className="empty">没有匹配的当前成员，可清除搜索或查看历史工位。</p>
         )}
         {workers.map((agent) => {
           const m = meta(agent);
@@ -1553,7 +1750,16 @@ function LiveBoard({ state }: { state: OfficeState }) {
               key={agent.id}
               className={`live-card status-${agent.status} clickable`}
               title="点击查看员工卡"
+              role="button"
+              tabIndex={0}
+              aria-label={`查看 ${agent.name} 的员工卡`}
               onClick={() => setDetailId(agent.id)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  setDetailId(agent.id);
+                }
+              }}
             >
               <header>
                 <Avatar agent={agent} status={agent.status} />
@@ -1629,11 +1835,16 @@ function TerminalBoard({ refreshKey }: { refreshKey: number }) {
   const [error, setError] = useState("");
   const [cmd, setCmd] = useState("");
   const [sending, setSending] = useState(false);
+  const [query, setQuery] = useState("");
+  const [showOffline, setShowOffline] = useState(false);
 
   const load = useCallback(() => {
     api.terminals().then(({ agents: panes }) => {
-      setAgents(panes);
-      setSelected((current) => (panes.some((pane) => pane.id === current) ? current : (panes[0]?.id ?? "")));
+      const sorted = sortTerminalsForAction(panes);
+      setAgents(sorted);
+      setSelected((current) =>
+        sorted.some((pane) => pane.id === current) ? current : (sorted[0]?.id ?? ""),
+      );
       setError("");
     }).catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, []);
@@ -1644,16 +1855,44 @@ function TerminalBoard({ refreshKey }: { refreshKey: number }) {
     return () => window.clearInterval(timer);
   }, [load, refreshKey]);
 
+  const panes = useMemo(
+    () => visibleTerminals(agents, showOffline, query),
+    [agents, showOffline, query],
+  );
+  const offlineCount = agents.filter((pane) => pane.status === "offline").length;
+
+  useEffect(() => {
+    if (panes.some((pane) => pane.id === selected)) return;
+    setSelected(panes[0]?.id ?? "");
+  }, [panes, selected]);
+
   const current = agents.find((pane) => pane.id === selected);
   return (
     <div className="terminal-wrap">
       <aside className="terminal-list">
         <div className="terminal-list-head">
           <strong>终端工位</strong>
-          <button className="icon-btn" title="刷新终端" onClick={load}>↻</button>
+          <button className="icon-btn" title="刷新终端" aria-label="刷新终端" onClick={load}>↻</button>
         </div>
-        {agents.length === 0 && <p className="empty">暂无可用终端。托管工位与带续聊凭证的 codex/claude 会话都会出现在这里。</p>}
-        {agents.map((pane) => (
+        <div className="terminal-filters">
+          <input
+            type="search"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="搜索终端"
+            aria-label="搜索终端工位"
+          />
+          {offlineCount > 0 && (
+            <button
+              className={showOffline ? "active" : ""}
+              onClick={() => setShowOffline((value) => !value)}
+            >
+              {showOffline ? "隐藏历史" : `历史 ${offlineCount}`}
+            </button>
+          )}
+        </div>
+        {panes.length === 0 && <p className="empty">没有匹配的可用终端，可查看历史或清除搜索。</p>}
+        {panes.map((pane) => (
           <button key={pane.id} className={`terminal-agent ${pane.id === selected ? "active" : ""}`} onClick={() => setSelected(pane.id)}>
             <span><b>{pane.name}</b><small>{AGENT_KIND_LABELS[pane.kind as keyof typeof AGENT_KIND_LABELS] ?? pane.kind}</small></span>
             <em className={`term-status ${pane.status}`}>{STATUS_LABELS[pane.status] ?? pane.status}</em>
@@ -2330,6 +2569,10 @@ export function App() {
   >("office");
   const [channel, setChannel] = useState("hall");
   const [onboardOpen, setOnboardOpen] = useState(false);
+  const [onboardTab, setOnboardTab] = useState<OnboardTabId>("cursor");
+  const [agentQuery, setAgentQuery] = useState("");
+  const [showArchivedAgents, setShowArchivedAgents] = useState(false);
+  const [syncError, setSyncError] = useState("");
   const refreshTimer = useRef<number | null>(null);
 
   // 当前频道对应的项目组被解散时回到大群
@@ -2343,15 +2586,26 @@ export function App() {
     if (refreshTimer.current) return;
     refreshTimer.current = window.setTimeout(() => {
       refreshTimer.current = null;
-      api.state().then(setState).catch(() => {});
+      api.state()
+        .then((nextState) => {
+          setState(nextState);
+          setSyncError("");
+        })
+        .catch(() => setSyncError("办公室数据同步中断，正在自动重试。"));
     }, 300);
   }, []);
 
   useEffect(() => {
-    api.state().then(setState).catch(() => {});
+    api.state()
+      .then((nextState) => {
+        setState(nextState);
+        setSyncError("");
+      })
+      .catch(() => setSyncError("无法连接办公室中枢。"));
     api.health().then(setHealth).catch(() => {});
     const source = new EventSource("/api/events");
     source.onmessage = () => refresh();
+    source.onerror = () => setSyncError("实时连接中断，正在自动重连。上次数据仍可查看。");
     const healthTimer = window.setInterval(() => {
       api.health().then(setHealth).catch(() => setHealth(null));
     }, 30_000);
@@ -2371,8 +2625,10 @@ export function App() {
         </div>
         <p>正在连接办公室中枢……</p>
         <p className="loading-sub">
-          如果一直停在这里，请先启动中枢：<code>agent-office\启动办公室.bat</code>
+          {syncError || "如果一直停在这里，请先启动中枢："}
+          {!syncError && <code>agent-office\启动办公室.bat</code>}
         </p>
+        {syncError && <button className="primary-btn" onClick={() => window.location.reload()}>重新连接</button>}
       </div>
     );
   }
@@ -2381,12 +2637,44 @@ export function App() {
   const agents = state.agents.filter((a) => a.kind !== "user");
   const deskAgents = agents.filter((a) => a.kind !== "supervisor");
   const onlineCount = deskAgents.filter((a) => a.status !== "offline").length;
+  const rosterSelection = selectWorkers({
+    agents: state.agents,
+    tasks: state.tasks,
+    query: agentQuery,
+    showArchived: showArchivedAgents,
+  });
 
-  const systemChips = [
+  const systemChips: Array<{
+    label: string;
+    ok: boolean;
+    detail: string;
+    target?: OnboardTabId;
+  }> = [
     { label: "中枢", ok: Boolean(health), detail: health ? "在线" : "离线" },
-    { label: "Codex", ok: Boolean(health?.codexCli), detail: health?.codexCli ? "可用" : "未检测到" },
-    { label: "Claude", ok: Boolean(health?.claudeCli), detail: health?.claudeCli ? "可用" : "未检测到" },
-    { label: "Cursor Key", ok: Boolean(health?.cursorKey), detail: health?.cursorKey ? "已配置" : "未配置" },
+    {
+      label: "Cursor",
+      ok: Boolean(health?.integrations?.cursor.ready),
+      detail: health?.integrations?.cursor.ready
+        ? "接入完整"
+        : health?.integrations?.cursor.issues.join("、") || "状态未加载",
+      target: "cursor",
+    },
+    {
+      label: "Codex",
+      ok: Boolean(health?.integrations?.codex.ready),
+      detail: health?.integrations?.codex.ready
+        ? "接入完整"
+        : health?.integrations?.codex.issues.join("、") || "状态未加载",
+      target: "codex",
+    },
+    {
+      label: "Claude",
+      ok: Boolean(health?.integrations?.claude.ready),
+      detail: health?.integrations?.claude.ready
+        ? "接入完整"
+        : health?.integrations?.claude.issues.join("、") || "状态未加载",
+      target: "claude",
+    },
   ];
 
   return (
@@ -2463,26 +2751,47 @@ export function App() {
         </nav>
         <div className="topbar-right">
           <div className="health" aria-label="系统状态">
-            {systemChips.map((c) => (
-              <span
-                key={c.label}
-                className={`sys-dot ${c.ok ? "ok" : "bad"}`}
-                title={`${c.label}：${c.detail}`}
-              >
-                {c.label}
-              </span>
-            ))}
+            {systemChips.map((chip) =>
+              chip.target ? (
+                <button
+                  key={chip.label}
+                  className={`sys-dot ${chip.ok ? "ok" : "bad"}`}
+                  title={`${chip.label}：${chip.detail}`}
+                  onClick={() => {
+                    setOnboardTab(chip.target!);
+                    setOnboardOpen(true);
+                  }}
+                >
+                  {chip.label}
+                </button>
+              ) : (
+                <span
+                  key={chip.label}
+                  className={`sys-dot ${chip.ok ? "ok" : "bad"}`}
+                  title={`${chip.label}：${chip.detail}`}
+                >
+                  {chip.label}
+                </span>
+              ),
+            )}
           </div>
           <BossNameControl boss={boss} onChanged={refresh} />
-          <button className="primary-btn onboard-btn" onClick={() => setOnboardOpen(true)}>
+          <button className="primary-btn onboard-btn" onClick={() => {
+            setOnboardTab("cursor");
+            setOnboardOpen(true);
+          }}>
             ＋ 接入 Agent
           </button>
         </div>
       </header>
 
+      {syncError && <div className="connection-banner" role="status">{syncError}</div>}
+
       {view === "pixel" ? (
         <main className="pixel-main">
-          <PixelOffice state={state} onChanged={refresh} />
+          <Suspense fallback={<div className="view-loading">正在打开像素办公室…</div>}>
+            <PixelOffice state={state} onChanged={refresh} />
+          </Suspense>
         </main>
       ) : view === "live" ? (
         <main className="live-main">
@@ -2494,7 +2803,9 @@ export function App() {
         </main>
       ) : view === "shell" ? (
         <main className="shell-main">
-          <ShellBoard />
+          <Suspense fallback={<div className="view-loading">正在打开本机终端…</div>}>
+            <ShellBoard />
+          </Suspense>
         </main>
       ) : view === "logs" ? (
         <main className="logs-main">
@@ -2511,16 +2822,33 @@ export function App() {
               <div className="panel-head">
                 <h3>工位</h3>
                 <span className="panel-count">
-                  {onlineCount}/{deskAgents.length}
+                  {rosterSelection.visible.length}/{rosterSelection.totalCount}
                 </span>
               </div>
+              <div className="operability-toolbar roster-tools">
+                <input
+                  type="search"
+                  value={agentQuery}
+                  onChange={(event) => setAgentQuery(event.target.value)}
+                  placeholder="搜索工号、职位、模型"
+                  aria-label="搜索工位"
+                />
+                {rosterSelection.archivedCount > 0 && (
+                  <button
+                    className={showArchivedAgents ? "active" : ""}
+                    onClick={() => setShowArchivedAgents((value) => !value)}
+                  >
+                    {showArchivedAgents ? "只看当前" : `历史 ${rosterSelection.archivedCount}`}
+                  </button>
+                )}
+              </div>
               <div className="badges">
-                {deskAgents.length === 0 && (
+                {rosterSelection.visible.length === 0 && (
                   <p className="empty">
-                    还没有成员入驻。点右上角「接入 Agent」，或在下方新建托管工位。
+                    没有匹配的当前工位，可清除搜索、查看历史或新建托管工位。
                   </p>
                 )}
-                {deskAgents.map((agent) => (
+                {rosterSelection.visible.map((agent) => (
                   <AgentBadge
                     key={agent.id}
                     agent={agent}
@@ -2561,7 +2889,14 @@ export function App() {
         </main>
       )}
 
-      {onboardOpen && <OnboardModal onClose={() => setOnboardOpen(false)} />}
+      {onboardOpen && (
+        <OnboardModal
+          health={health}
+          initialTab={onboardTab}
+          onHealthChanged={setHealth}
+          onClose={() => setOnboardOpen(false)}
+        />
+      )}
     </div>
   );
 }

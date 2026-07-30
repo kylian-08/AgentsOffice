@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { IntegrationClient } from "@agent-office/protocol";
 import { uuid } from "../util.js";
 import type { OfficeConfig } from "../config.js";
 import { generateAvatar } from "../domain/avatar.js";
@@ -17,7 +18,8 @@ import {
 } from "../integrations/ingest.js";
 import { createMcpServer } from "../mcp/tools.js";
 import { ShellTerminalManager } from "../domain/shellterm.js";
-import { cliExists } from "../util.js";
+import { repairIntegration } from "../setup/install.js";
+import { readOfficeHealth } from "../setup/status.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -70,14 +72,23 @@ export async function createServer(
   });
 
   // ---------- REST API ----------
-  app.get("/api/health", async () => ({
-    ok: true,
-    port: config.port,
-    dataDir: config.dataDir,
-    codexCli: await cliExists("codex"),
-    claudeCli: await cliExists("claude"),
-    cursorKey: Boolean(process.env.CURSOR_API_KEY),
-  }));
+  const health = () =>
+    readOfficeHealth({
+      port: config.port,
+      dataDir: config.dataDir,
+      cursorKey: Boolean(process.env.CURSOR_API_KEY),
+    });
+
+  app.get("/api/health", health);
+
+  app.post("/api/integrations/repair", async (request, reply) => {
+    const client = (request.body as { client?: unknown } | undefined)?.client;
+    if (client !== "cursor" && client !== "codex" && client !== "claude") {
+      return reply.code(400).send({ error: "client 必须是 cursor、codex 或 claude" });
+    }
+    repairIntegration(client as IntegrationClient);
+    return health();
+  });
 
   app.get("/api/state", async () => ({
     agents: office.store.listAgents(),
@@ -531,6 +542,7 @@ export async function createServer(
         name: a.name,
         kind: a.kind,
         status: a.status,
+        lastSeenAt: a.lastSeenAt,
         lines: office.terminals.get(a.id),
       })),
     };

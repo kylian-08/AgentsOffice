@@ -1,13 +1,14 @@
 // 一键出包：全量构建 → electron-builder 打 exe → 拷贝到仓库根目录。
 // 用法：pnpm dist（每次更新代码后跑一遍，根目录的 exe 永远是最新版）
 import { spawnSync } from "node:child_process";
-import { copyFileSync, readdirSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, readdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const DESKTOP = join(ROOT, "apps/desktop");
 const RELEASE = join(DESKTOP, "release");
+const LOCAL_ELECTRON_DIST = join(DESKTOP, "node_modules", "electron", "dist");
 
 function run(cmd, cwd) {
   console.log(`\n[dist] ${cmd}`);
@@ -18,7 +19,10 @@ function run(cmd, cwd) {
   }
 }
 
-// 正在运行的桌面客户端会锁住 release/win-unpacked，先请它退出（hub 单独跑的不受影响）
+// 先完成源码构建。即使编译失败，也不打断正在使用的桌面客户端。
+run("pnpm -r build", ROOT);
+
+// 正在运行的桌面客户端会锁住 release/win-unpacked，打包前再请它退出（hub 单独跑的不受影响）
 spawnSync("taskkill /im AgentOffice.exe /f /t", { shell: true, stdio: "ignore" });
 
 // 清掉历史输出目录，避免锁残留导致 EBUSY
@@ -30,8 +34,10 @@ for (const dir of ["release", "release2"]) {
   }
 }
 
-run("pnpm -r build", ROOT);
-run("npx electron-builder --win", DESKTOP);
+const electronDistArg = existsSync(LOCAL_ELECTRON_DIST)
+  ? ` --config.electronDist="${LOCAL_ELECTRON_DIST.replaceAll("\\", "/")}"`
+  : "";
+run(`pnpm exec electron-builder --win --config.compression=normal${electronDistArg}`, DESKTOP);
 
 const files = readdirSync(RELEASE);
 const portable = files.find((f) => /portable\.exe$/i.test(f));

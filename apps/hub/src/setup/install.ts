@@ -9,11 +9,13 @@ import {
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { IntegrationClient } from "@agent-office/protocol";
 import { DEFAULT_PORT, loadConfig } from "../config.js";
 import {
   mergeClaudeMcpJson,
   mergeClaudeSettings,
   mergeCodexToml,
+  getCodexNotifyCommand,
   mergeHooksJson,
   mergeMcpJson,
   removeFromClaudeSettings,
@@ -27,7 +29,41 @@ import {
 const HERE = dirname(fileURLToPath(import.meta.url));
 // dist/setup → agent-office 根目录
 const OFFICE_ROOT = resolve(HERE, "../../../..");
-const HOOKS_DIR = join(OFFICE_ROOT, "hooks");
+const MANAGED_HOOK_FILES = ["cursor-hook.mjs", "codex-notify.mjs", "claude-hook.mjs"] as const;
+
+export function resolveHooksSourceDir(env: NodeJS.ProcessEnv = process.env): string {
+  const bundledHooksDir = env.AGENT_OFFICE_HOOKS_DIR?.trim();
+  return bundledHooksDir ? resolve(bundledHooksDir) : join(OFFICE_ROOT, "hooks");
+}
+
+export function resolveHookNode(
+  env: NodeJS.ProcessEnv = process.env,
+  execPath = process.execPath,
+  isElectron = "electron" in process.versions,
+): string {
+  const configuredNode = env.AGENT_OFFICE_HOOK_NODE?.trim();
+  if (configuredNode) return resolve(configuredNode);
+  if (!isElectron) return execPath;
+  throw new Error("未检测到系统 Node.js，无法安装 Agent Office Hooks");
+}
+
+export interface HookCommands {
+  cursor: string;
+  codexNotify: string[];
+  claude: string;
+}
+
+export function buildHookCommands(
+  node: string,
+  hooksDir: string,
+  baseUrl: string,
+): HookCommands {
+  return {
+    cursor: `"${node}" "${join(hooksDir, "cursor-hook.mjs")}" "${baseUrl}"`,
+    codexNotify: [node, join(hooksDir, "codex-notify.mjs"), baseUrl],
+    claude: `"${node}" "${join(hooksDir, "claude-hook.mjs")}" "${baseUrl}"`,
+  };
+}
 
 function timestamp(): string {
   return new Date().toISOString().replaceAll(/[-:T]/g, "").slice(0, 14);
@@ -155,42 +191,101 @@ function removeClaudeUserMcp(): void {
 
 /** 备份后写入，返回备份路径（如有） */
 function backupAndWrite(path: string, content: string, backups: string[]): void {
+  if (readIfExists(path) === content) return;
   const b = backup(path);
   if (b) backups.push(b);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, content, "utf8");
 }
 
-export function install(workspace: string | null): void {
+function syncManagedHooks(
+  sourceDir: string,
+  targetDir: string,
+  filenames: readonly (typeof MANAGED_HOOK_FILES)[number][],
+  backups: string[],
+): void {
+  for (const filename of filenames) {
+    const source = join(sourceDir, filename);
+    if (!existsSync(source)) throw new Error(`缺少 Hook 资源: ${source}`);
+    const target = join(targetDir, filename);
+    const content = readFileSync(source, "utf8");
+    if (readIfExists(target) === content) continue;
+    backupAndWrite(target, content, backups);
+  }
+}
+
+interface UserInstallContext {
+  config: ReturnType<typeof loadConfig>;
+  mcpUrl: string;
+  user: UserPaths;
+  backups: string[];
+  notes: string[];
+  commands: HookCommands;
+  hooksDir: string;
+}
+
+const CLIENT_HOOK_FILE: Record<IntegrationClient, (typeof MANAGED_HOOK_FILES)[number]> = {
+  cursor: "cursor-hook.mjs",
+  codex: "codex-notify.mjs",
+  claude: "claude-hook.mjs",
+};
+
+function prepareUserInstall(client?: IntegrationClient): UserInstallContext {
   const config = loadConfig();
-  const mcpUrl = `http://127.0.0.1:${config.port}/mcp`;
+  const baseUrl = `http://127.0.0.1:${config.port}`;
+  const mcpUrl = `${baseUrl}/mcp`;
   const user = userPaths();
-  const node = process.execPath;
-  const cursorHookCmd = `"${node}" "${join(HOOKS_DIR, "cursor-hook.mjs")}"`;
-  const codexNotifyCmd = [node, join(HOOKS_DIR, "codex-notify.mjs")];
-  const claudeHookCmd = `"${node}" "${join(HOOKS_DIR, "claude-hook.mjs")}"`;
   const backups: string[] = [];
   const notes: string[] = [];
+  const node = resolveHookNode();
+  const hooksDir = resolve(config.dataDir, "hooks");
+  const hookFiles = client ? [CLIENT_HOOK_FILE[client]] : MANAGED_HOOK_FILES;
+  syncManagedHooks(resolveHooksSourceDir(), hooksDir, hookFiles, backups);
+  const commands = buildHookCommands(node, hooksDir, baseUrl);
+  return { config, mcpUrl, user, backups, notes, commands, hooksDir };
+}
 
-  // ---------- 用户级：任意目录的会话都自动入驻 ----------
-
-  // 1. Cursor：全局 MCP + 全局 hooks（协作规则由 sessionStart hook 注入）
+function installCursor(context: UserInstallContext): void {
+  const { user, mcpUrl, commands, backups } = context;
   backupAndWrite(user.cursorMcp, mergeMcpJson(readIfExists(user.cursorMcp), mcpUrl), backups);
   backupAndWrite(
     user.cursorHooks,
-    mergeHooksJson(readIfExists(user.cursorHooks), cursorHookCmd),
+    mergeHooksJson(readIfExists(user.cursorHooks), commands.cursor),
     backups,
   );
+}
 
-  // 2. Codex：全局 config.toml（MCP + notify）+ 全局 AGENTS.md 协作协议
-  const codexBackup = backup(user.codexConfig);
-  if (codexBackup) backups.push(codexBackup);
-  mkdirSync(dirname(user.codexConfig), { recursive: true });
-  const merged = mergeCodexToml(readIfExists(user.codexConfig), {
+function installCodex(context: UserInstallContext): void {
+  const { user, mcpUrl, commands, backups, notes, hooksDir } = context;
+  const existingCodexConfig = readIfExists(user.codexConfig);
+  const existingNotify = getCodexNotifyCommand(existingCodexConfig);
+  const notifyIsOurs = existingNotify?.some((item) => item.includes("codex-notify.mjs")) ?? false;
+  const chainPath = join(hooksDir, "codex-notify-chain.json");
+  let notifyCommand = commands.codexNotify;
+  if (existingNotify && !notifyIsOurs) {
+    backupAndWrite(
+      chainPath,
+      JSON.stringify({ command: existingNotify }, null, 2) + "\n",
+      backups,
+    );
+    notifyCommand = [...notifyCommand, chainPath];
+    notes.push("已通过 Agent Office Notify 链保留现有 Codex notify 命令。");
+  } else {
+    const existingChainPath = existingNotify?.find((item) =>
+      item.endsWith("codex-notify-chain.json"),
+    );
+    if (existingChainPath && existsSync(existingChainPath)) {
+      const chainContent = readFileSync(existingChainPath, "utf8");
+      backupAndWrite(chainPath, chainContent, backups);
+      notifyCommand = [...notifyCommand, chainPath];
+    }
+  }
+  const merged = mergeCodexToml(existingCodexConfig, {
     mcpUrl,
-    notifyCommand: codexNotifyCmd,
+    notifyCommand,
+    replaceExistingNotify: Boolean(existingNotify && !notifyIsOurs),
   });
-  writeFileSync(user.codexConfig, merged.toml, "utf8");
+  backupAndWrite(user.codexConfig, merged.toml, backups);
   if (merged.notifySkipped) {
     notes.push(
       "~/.codex/config.toml 已存在其他 notify 配置，未覆盖；如需回帧简报请手工把 codex-notify.mjs 加入 notify。",
@@ -201,11 +296,13 @@ export function install(workspace: string | null): void {
     upsertMarkerBlock(readIfExists(user.codexAgentsMd), AGENTS_MD_BLOCK),
     backups,
   );
+}
 
-  // 3. Claude：全局 hooks + user-scope MCP
+function installClaude(context: UserInstallContext): void {
+  const { user, mcpUrl, commands, backups, notes } = context;
   backupAndWrite(
     user.claudeSettings,
-    mergeClaudeSettings(readIfExists(user.claudeSettings), claudeHookCmd),
+    mergeClaudeSettings(readIfExists(user.claudeSettings), commands.claude),
     backups,
   );
   if (registerClaudeUserMcp(mcpUrl)) {
@@ -215,6 +312,24 @@ export function install(workspace: string | null): void {
       `未检测到 claude CLI 或注册失败；请手工执行：claude mcp add --scope user --transport http agent-office ${mcpUrl}`,
     );
   }
+}
+
+export function repairIntegration(client: IntegrationClient): void {
+  const context = prepareUserInstall(client);
+  if (client === "cursor") installCursor(context);
+  else if (client === "codex") installCodex(context);
+  else installClaude(context);
+  console.log(`[agent-office] ${client} 接入修复完成。`);
+  for (const backupPath of context.backups) console.log(`  备份: ${backupPath}`);
+  for (const note of context.notes) console.log(`  注意: ${note}`);
+}
+
+export function install(workspace: string | null): void {
+  const context = prepareUserInstall();
+  installCursor(context);
+  installCodex(context);
+  installClaude(context);
+  const { config, mcpUrl, backups, notes } = context;
 
   // ---------- 工作区级（可选）：标记「办公室工作区」，写入可随仓库共享的文件 ----------
   if (workspace) {
@@ -282,12 +397,23 @@ export function uninstall(workspace: string | null): void {
     }
   };
 
+  const loadNotifyChain = (path: string): string[] | null => {
+    try {
+      const command = (JSON.parse(readFileSync(path, "utf8")) as { command?: unknown }).command;
+      return Array.isArray(command) && command.every((item) => typeof item === "string")
+        ? command
+        : null;
+    } catch {
+      return null;
+    }
+  };
+
   // 用户级
   edit(user.cursorMcp, removeFromMcpJson);
   edit(user.cursorHooks, (c) =>
     removeFromHooksJson(c) ?? JSON.stringify({ version: 1, hooks: {} }, null, 2) + "\n",
   );
-  edit(user.codexConfig, removeFromCodexToml);
+  edit(user.codexConfig, (content) => removeFromCodexToml(content, loadNotifyChain));
   edit(user.codexAgentsMd, removeMarkerBlock);
   edit(user.claudeSettings, removeFromClaudeSettings);
   removeClaudeUserMcp();

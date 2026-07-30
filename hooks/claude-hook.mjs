@@ -2,7 +2,7 @@
 // Hub 不在线时 fail-open，输出 {} 不阻塞 Claude Code。
 import { readFileSync } from "node:fs";
 
-const base = process.env.AGENT_OFFICE_URL || "http://127.0.0.1:4517";
+const base = process.argv[2] || process.env.AGENT_OFFICE_URL || "http://127.0.0.1:4517";
 
 let payload = {};
 try {

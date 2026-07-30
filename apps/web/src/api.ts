@@ -1,10 +1,12 @@
 import type {
   AgentCard,
   KbDoc,
+  IntegrationClient,
   LogEntry,
   OfficeBrief,
   OfficeEvent,
   OfficeGroup,
+  OfficeHealth,
   OfficeMessage,
   OfficeRole,
   OfficeTask,
@@ -32,6 +34,7 @@ export interface TerminalPane {
   name: string;
   kind: string;
   status: string;
+  lastSeenAt?: number | null;
   lines: TermLine[];
 }
 
@@ -47,14 +50,9 @@ export interface ShellTermInfo {
   exitCode: number | null;
 }
 
-export interface Health {
-  ok: boolean;
-  port: number;
-  dataDir: string;
-  codexCli: boolean;
-  claudeCli: boolean;
-  cursorKey: boolean;
-}
+export type Health = Omit<OfficeHealth, "integrations"> & {
+  integrations?: OfficeHealth["integrations"];
+};
 
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
@@ -67,12 +65,23 @@ async function json<T>(res: Response): Promise<T> {
 export const api = {
   state: () => fetch("/api/state").then((r) => json<OfficeState>(r)),
   health: () => fetch("/api/health").then((r) => json<Health>(r)),
+  repairIntegration: (client: IntegrationClient) =>
+    fetch("/api/integrations/repair", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ client }),
+    }).then((r) => json<Health>(r)),
   sendMessage: (text: string, channel?: string, images?: string[]) =>
     fetch("/api/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ text, channel, images }),
-    }).then((r) => json<{ routed: Array<{ name: string; mode: string }> }>(r)),
+    }).then((r) =>
+      json<{
+        routed: Array<{ name: string; mode: string }>;
+        unmatched: boolean;
+      }>(r),
+    ),
   /** 上传图片（base64），返回 /files/xxx 的 URL */
   uploadImage: async (file: File) => {
     const data = await new Promise<string>((resolve, reject) => {

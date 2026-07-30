@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { BrowserWindow, app, session, shell } from "electron";
@@ -22,6 +22,22 @@ function readPort(): number {
 /** 打包后资源在 resources/app 下；开发模式直接用 dist/resources */
 function resourcesDir(): string {
   return app.isPackaged ? join(process.resourcesPath, "app") : join(__dirname, "resources");
+}
+
+function findSystemNode(): string | null {
+  const locator = process.platform === "win32" ? "where.exe" : "which";
+  const result = spawnSync(locator, ["node"], {
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 5000,
+  });
+  if (result.status !== 0) return null;
+  return (
+    result.stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((path) => path.length > 0 && existsSync(path)) ?? null
+  );
 }
 
 async function healthy(port: number): Promise<boolean> {
@@ -59,6 +75,8 @@ function startHub(port: number): void {
         ELECTRON_RUN_AS_NODE: "1",
         AGENT_OFFICE_PORT: String(port),
         AGENT_OFFICE_WEB_DIST: join(res, "web"),
+        AGENT_OFFICE_HOOKS_DIR: join(res, "hooks"),
+        AGENT_OFFICE_HOOK_NODE: findSystemNode() ?? "",
       },
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,

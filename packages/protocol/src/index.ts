@@ -131,6 +131,27 @@ export interface OfficeEvent {
   createdAt: number;
 }
 
+export interface ClientIntegrationHealth {
+  ready: boolean;
+  runtimeAvailable: boolean | null;
+  mcpConfigured: boolean;
+  hookConfigured: boolean;
+  instructionsConfigured: boolean | null;
+  issues: string[];
+}
+
+export type IntegrationClient = "cursor" | "codex" | "claude";
+
+export interface OfficeHealth {
+  ok: boolean;
+  port: number;
+  dataDir: string;
+  codexCli: boolean;
+  claudeCli: boolean;
+  cursorKey: boolean;
+  integrations: Record<IntegrationClient, ClientIntegrationHealth>;
+}
+
 export const BriefInputSchema = z.object({
   title: z.string().min(1).max(200).describe("简报标题，一句话概括"),
   result: z.string().min(1).describe("结果：完成了什么/结论是什么"),

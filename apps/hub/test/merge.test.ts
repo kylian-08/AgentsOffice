@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { parse as parseToml } from "smol-toml";
 import {
   mergeCodexToml,
+  getCodexNotifyCommand,
   mergeHooksJson,
   mergeMcpJson,
   removeFromCodexToml,
@@ -136,6 +137,27 @@ describe("mergeCodexToml", () => {
     expect(notifySkipped).toBe(true);
     const doc = parseToml(toml) as any;
     expect(doc.notify).toEqual(["python", "other.py"]);
+  });
+
+  it("显式链式接管时替换 notify，并能在卸载时恢复", () => {
+    const previous = ["codex-computer-use.exe", "turn-ended"];
+    const chainPath = "D:\\office\\hooks\\codex-notify-chain.json";
+    const chained = [...NOTIFY, chainPath];
+    const { toml, notifySkipped } = mergeCodexToml(
+      `notify = ["${previous[0]}", "${previous[1]}"]`,
+      {
+        mcpUrl: MCP_URL,
+        notifyCommand: chained,
+        replaceExistingNotify: true,
+      },
+    );
+
+    expect(notifySkipped).toBe(false);
+    expect(getCodexNotifyCommand(toml)).toEqual(chained);
+    const restored = parseToml(
+      removeFromCodexToml(toml, (path) => (path === chainPath ? previous : null)),
+    ) as any;
+    expect(restored.notify).toEqual(previous);
   });
 
   it("我们自己的 notify 可以重复合并", () => {

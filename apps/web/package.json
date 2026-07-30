@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "echo \"web: no tests\" && exit 0"
+    "test": "vitest run"
   },
   "dependencies": {
     "@agent-office/protocol": "workspace:*",
@@ -20,6 +20,7 @@
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^4.4.1",
     "typescript": "^5.7.3",
-    "vite": "^6.3.5"
+    "vite": "^6.3.5",
+    "vitest": "^3.2.4"
   }
 }
