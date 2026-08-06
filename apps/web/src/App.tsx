@@ -57,6 +57,7 @@ const SOURCE_LABELS: Record<string, string> = {
   "codex-managed": "托管执行",
   "cursor-managed": "托管执行",
   "claude-managed": "托管执行",
+  handoff: "任务交接",
 };
 
 /** 事件类型 → 时间线图标符号 */
@@ -68,6 +69,7 @@ const EVENT_ICONS: Record<string, string> = {
   brief: "报",
   task: "件",
   dispatch: "派",
+  handoff: "接",
   run: "⚙",
   "run-error": "!",
   stop: "·",
@@ -341,8 +343,8 @@ function RoleDossierModal({
         {error && <div className="form-error dossier-error">{error}</div>}
         <div className="modal-body dossier-body">
           <p className="dossier-hint">
-            档案跟职位走、不跟人走：笔记、历任简报、岗位收到过的定向消息都会自动交接给任何接任者（不限
-            Cursor / Codex / Claude）。
+            同岗成员共享职位档案与知识库：笔记、解决方案、历任简报和岗位消息会自动交接（不限 Cursor /
+            Codex / Claude）。
           </p>
           <h4>档案笔记（{dossier?.notes.length ?? 0}）</h4>
           {(dossier?.notes ?? []).map((n) => (
@@ -375,6 +377,20 @@ function RoleDossierModal({
               ＋ 写入档案
             </button>
           </div>
+          {(dossier?.knowledge ?? []).length > 0 && (
+            <>
+              <h4>同岗知识库（{(dossier?.knowledge ?? []).length}）</h4>
+              {(dossier?.knowledge ?? []).map((k) => (
+                <div key={k.id} className="dossier-note">
+                  <div className="dossier-note-head">
+                    <strong>{k.category} / {k.title}</strong>
+                    <span>{k.author ?? "匿名"} · {timeAgo(k.updatedAt)}</span>
+                  </div>
+                  <pre>{k.content.slice(0, 500)}</pre>
+                </div>
+              ))}
+            </>
+          )}
           {(dossier?.briefs.length ?? 0) > 0 && (
             <>
               <h4>历任简报（近 {dossier!.briefs.length} 份）</h4>
@@ -872,7 +888,7 @@ const ONBOARD_TABS = [
     label: "Cursor",
     intro: "已有会话：把下面这句话直接发给那个 Cursor Agent（MCP 即时生效）：",
     prompt:
-      "本机有 Agent Office 协作中枢（MCP 服务 agent-office）。请调用 register_agent 登记，工号自拟（如 cursor-前端），kind 填 cursor-ide；之后每轮开始先 read_inbox，完成工作后 publish_brief。",
+      "本机有 Agent Office 协作中枢（MCP 服务 agent-office）。请调用 register_agent 登记，工号自拟（如 cursor-前端），kind 填 cursor-ide；每轮开始先 read_inbox，完成工作后 publish_brief；阶段任务需要同事接手时调用 handoff_task 自动交接并唤醒。",
     note: "新开的 Cursor 会话（任意项目）会自动登记，无需此步骤。",
   },
   {
@@ -880,7 +896,7 @@ const ONBOARD_TABS = [
     label: "Codex",
     intro: "已有终端：在那个 Codex 终端里直接输入（MCP 未加载时需先重启 Codex）：",
     prompt:
-      "本机有 Agent Office 协作中枢（MCP 服务 agent_office）。请调用 register_agent 登记，工号自拟（如 codex-主力），kind 填 codex-cli；之后每轮开始先 read_inbox，完成工作后 publish_brief。",
+      "本机有 Agent Office 协作中枢（MCP 服务 agent_office）。请调用 register_agent 登记，工号自拟（如 codex-主力），kind 填 codex-cli；每轮开始先 read_inbox，完成工作后 publish_brief；阶段任务需要同事接手时调用 handoff_task 自动交接并唤醒。",
     note: "新启动的 Codex 会话每轮结束会自动回帧简报，并从 ~/.codex/AGENTS.md 读到协作协议。",
   },
   {
@@ -888,7 +904,7 @@ const ONBOARD_TABS = [
     label: "Claude Code",
     intro: "已有会话：把下面这句话发给那个 Claude Code 会话：",
     prompt:
-      "本机有 Agent Office 协作中枢（MCP 服务 agent-office）。请调用 register_agent 登记，工号自拟（如 claude-架构），kind 填 claude-cli；之后每轮开始先 read_inbox，完成工作后 publish_brief。",
+      "本机有 Agent Office 协作中枢（MCP 服务 agent-office）。请调用 register_agent 登记，工号自拟（如 claude-架构），kind 填 claude-cli；每轮开始先 read_inbox，完成工作后 publish_brief；阶段任务需要同事接手时调用 handoff_task 自动交接并唤醒。",
     note: "新启动的 Claude Code 会话（任意目录）会自动登记。",
   },
 ] as const;
@@ -2316,7 +2332,13 @@ function LogsBoard() {
 
 type KbCatalog = Array<{
   category: string;
-  docs: Array<{ id: string; title: string; tags: string[]; updatedAt: number }>;
+  docs: Array<{
+    id: string;
+    roleId: string | null;
+    title: string;
+    tags: string[];
+    updatedAt: number;
+  }>;
 }>;
 
 function KbBoard({ refreshKey }: { refreshKey: number }) {

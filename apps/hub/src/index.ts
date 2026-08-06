@@ -29,6 +29,10 @@ async function main(): Promise<void> {
   if (recovered > 0) {
     console.log(`[agent-office] 重启恢复：为 ${recovered} 位托管员工补派了积压消息`);
   }
+  const recoveredHandoffs = office.recoverQueuedHandoffs();
+  if (recoveredHandoffs > 0) {
+    console.log(`[agent-office] 重启恢复：补齐了 ${recoveredHandoffs} 个待派发任务交接`);
+  }
 
   const shutdown = async () => {
     clearInterval(sweeper);

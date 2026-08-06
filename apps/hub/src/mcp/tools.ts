@@ -27,7 +27,7 @@ export function createMcpServer(office: OfficeService): McpServer {
     {
       title: "登记入驻办公室",
       description:
-        "在 Agent 办公室登记自己（幂等）。首次调用返回分配的工号；已有工号时会刷新在线状态并返回待读消息数。",
+        "在 Agent 办公室登记自己（幂等）。无职位时会自动进入当前人数最少的职位，同岗成员共享职位上下文与知识库。",
       inputSchema: {
         name: z.string().min(1).max(64).describe("你的工号/名字，例如 cursor-ab12cd"),
         kind: z
@@ -52,7 +52,12 @@ export function createMcpServer(office: OfficeService): McpServer {
       office.event({ type: "join", agentId: agent.id, text: "登记入驻" });
       return text({
         ok: true,
-        agent: { name: agent.name, kind: agent.kind, status: agent.status },
+        agent: {
+          name: agent.name,
+          kind: agent.kind,
+          status: agent.status,
+          role: (agent.meta as { title?: string }).title ?? null,
+        },
         pendingMessages: office.store.pendingCount(agent.id),
         hint: "有待读消息时请调用 read_inbox；完成工作后调用 publish_brief。",
       });
@@ -246,7 +251,7 @@ export function createMcpServer(office: OfficeService): McpServer {
     {
       title: "写入知识库",
       description:
-        "把遇到的疑难杂症及解决方案沉淀到公共知识库。带 id 为更新既有文档，不带 id 为新增。建议格式：问题现象 / 根因 / 解决步骤 / 验证方式。",
+        "把疑难杂症及解决方案沉淀到知识库。新文档会自动关联作者当前职位，供同岗成员共享；无职位作者写入全办公室公共知识。",
       inputSchema: {
         agent: z.string().describe("你的工号（作为文档作者）"),
         id: z.string().optional().describe("要更新的文档 ID，新增时不填"),
@@ -270,7 +275,12 @@ export function createMcpServer(office: OfficeService): McpServer {
         author: args.agent,
       });
       if (!result) return text({ ok: false, error: "要更新的文档不存在" });
-      return text({ ok: true, created: result.created, id: result.doc.id });
+      return text({
+        ok: true,
+        created: result.created,
+        id: result.doc.id,
+        roleId: result.doc.roleId,
+      });
     },
   );
 
@@ -342,6 +352,71 @@ export function createMcpServer(office: OfficeService): McpServer {
   );
 
   server.registerTool(
+    "handoff_task",
+    {
+      title: "交接任务并自动唤醒",
+      description:
+        "完成阶段工作后，把结构化上下文交给下一名员工并立即唤醒。目标可续聊时沿用原会话；不可续聊或只指定职位时，自动创建新的 Codex 托管 CLI，继承职位、项目组和工作区后接手。不要只在最终回复中写 @工号。",
+      inputSchema: {
+        from_agent: z.string().min(1).describe("交接员工 A 的工号"),
+        to_agent: z.string().optional().describe("接班员工 B 的工号；不存在或不可唤醒时可新建 CLI"),
+        to_role: z.string().optional().describe("接班职位名或职位 ID；未指定可继承 B 或 A 的职位"),
+        task_id: z.string().optional().describe("关联任务 ID；提供后会把负责人转给接班员工"),
+        summary: z.string().min(1).describe("A 已完成的工作和当前状态"),
+        artifacts: z.array(z.string()).max(50).optional().describe("代码、文件、分支、文档等产物"),
+        decisions: z.array(z.string()).max(50).optional().describe("已经确定的关键决策"),
+        blockers: z.array(z.string()).max(50).optional().describe("已知阻塞和风险"),
+        next_steps: z.array(z.string()).max(50).optional().describe("B 应继续执行的步骤"),
+        acceptance_criteria: z.array(z.string()).max(50).optional().describe("后半段验收条件"),
+        workspace: z.string().optional().describe("新 CLI 工作目录；缺省继承 B，再继承 A"),
+        spawn_if_needed: z
+          .boolean()
+          .optional()
+          .describe("B 不可唤醒时是否自动创建 Codex CLI，默认 true"),
+        idempotency_key: z
+          .string()
+          .max(200)
+          .optional()
+          .describe("稳定幂等键；重试时传相同值不会重复交接或创建员工"),
+        channel: z.string().optional().describe("交接消息所在频道，缺省为大群"),
+      },
+    },
+    async (args) => {
+      const result = office.handoffTask({
+        fromAgent: args.from_agent,
+        toAgent: args.to_agent,
+        toRole: args.to_role,
+        taskId: args.task_id,
+        summary: args.summary,
+        artifacts: args.artifacts,
+        decisions: args.decisions,
+        blockers: args.blockers,
+        nextSteps: args.next_steps,
+        acceptanceCriteria: args.acceptance_criteria,
+        workspace: args.workspace,
+        spawnIfNeeded: args.spawn_if_needed,
+        idempotencyKey: args.idempotency_key,
+        channel: args.channel,
+      });
+      if (!result.ok) return text({ ok: false, error: result.error, handoff: result.handoff });
+      return text({
+        ok: true,
+        duplicated: result.duplicated ?? false,
+        wakeMode: result.wakeMode,
+        agent: result.agent
+          ? {
+              name: result.agent.name,
+              kind: result.agent.kind,
+              workspace: result.agent.workspace,
+              role: (result.agent.meta as { title?: string }).title ?? null,
+            }
+          : null,
+        handoff: result.handoff,
+      });
+    },
+  );
+
+  server.registerTool(
     "publish_brief",
     {
       title: "发布工作简报",
@@ -370,7 +445,7 @@ export function createMcpServer(office: OfficeService): McpServer {
     {
       title: "获取职位交接档案",
       description:
-        "获取某职位的完整岗位上下文：职位说明、档案笔记（账号/路径/架构/决策等硬信息）、历任在岗者的简报、岗位收到过的定向消息。接任职位后先调用它，把档案当作自己的记忆使用。可按职位名或你的工号查询。",
+        "获取某职位的共享上下文：档案笔记、同岗知识库、历任简报和岗位定向消息。可按职位名或工号查询。",
       inputSchema: {
         agent: z.string().optional().describe("你的工号（查你当前职位的档案）"),
         role: z.string().optional().describe("职位名（直接指定职位）"),

@@ -15,6 +15,8 @@ export type AgentStatus = "online" | "busy" | "offline";
 
 export type TaskStatus = "open" | "claimed" | "in_progress" | "done" | "cancelled";
 
+export type TaskHandoffStatus = "queued" | "dispatched" | "running" | "accepted" | "failed";
+
 export interface AgentCard {
   id: string;
   name: string;
@@ -74,6 +76,8 @@ export interface RoleNote {
 export interface RoleDossier {
   role: OfficeRole;
   notes: RoleNote[];
+  /** 同岗成员通过知识库沉淀并共享的解决方案 */
+  knowledge: KbDoc[];
   briefs: Array<{ agentName: string; title: string; result: string; createdAt: number }>;
   messages: Array<{ fromName: string; text: string; createdAt: number }>;
 }
@@ -101,6 +105,31 @@ export interface OfficeTask {
   assigneeAgentId: string | null;
   assigneeName: string | null;
   createdBy: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** 阶段性交接：先持久化，再唤醒接班员工；可在 Hub 重启后恢复。 */
+export interface TaskHandoff {
+  id: string;
+  taskId: string | null;
+  fromAgentId: string;
+  fromAgentName: string;
+  toAgentId: string;
+  toAgentName: string;
+  requestedAgentId: string | null;
+  roleId: string | null;
+  roleName: string | null;
+  status: TaskHandoffStatus;
+  summary: string;
+  artifacts: string[];
+  decisions: string[];
+  blockers: string[];
+  nextSteps: string[];
+  acceptanceCriteria: string[];
+  idempotencyKey: string;
+  messageId: string | null;
+  error: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -199,6 +228,8 @@ export interface AgentMeta {
 /** 公共知识库文档：沉淀疑难杂症与解决方案，按目录（category）索引 */
 export interface KbDoc {
   id: string;
+  /** 归属职位；null 表示全办公室公共知识 */
+  roleId: string | null;
   category: string;
   title: string;
   content: string;
@@ -267,6 +298,7 @@ export function buildManagedPrompt(opts: {
 }): string {
   const lines = [
     `[Agent Office] 你是协作办公室的成员「${opts.agentName}」。`,
+    "如果你只完成了任务的一个阶段并需要同事接手，必须调用 handoff_task 保存交接材料并唤醒接班员工；不要只在最终回复里写 @工号。",
   ];
   if (opts.roleDossier) {
     const d = opts.roleDossier;
@@ -276,6 +308,9 @@ export function buildManagedPrompt(opts: {
     for (const n of d.notes.slice(0, 8)) {
       lines.push(`- [笔记] ${n.title}：${n.content.slice(0, 400)}`);
     }
+    for (const k of (d.knowledge ?? []).slice(0, 5)) {
+      lines.push(`- [同岗知识] ${k.category} / ${k.title}：${k.content.slice(0, 300)}`);
+    }
     for (const b of d.briefs.slice(0, 3)) {
       lines.push(`- [历任简报] ${b.agentName}：${b.title} — ${b.result.slice(0, 200)}`);
     }
@@ -283,7 +318,7 @@ export function buildManagedPrompt(opts: {
       lines.push(`- [岗位收到过的指示] ${m.fromName}：${m.text.slice(0, 200)}`);
     }
     lines.push(
-      "完整档案可用 MCP 工具 get_role_context 获取；工作中得到的岗位关键信息（账号、路径、架构结论、决策）请及时用 role_note_write 写进职位档案，方便任何接任者无缝接手。",
+      "完整档案可用 MCP 工具 get_role_context 获取；岗位关键信息用 role_note_write 写进职位档案，可复用的问题解法用 kb_write 写进知识库。同岗成员写入的知识会自动归入该职位并共享。",
       "",
     );
   }

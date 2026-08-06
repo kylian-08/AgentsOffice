@@ -222,7 +222,13 @@ export const api = {
       json<{
         catalog: Array<{
           category: string;
-          docs: Array<{ id: string; title: string; tags: string[]; updatedAt: number }>;
+          docs: Array<{
+            id: string;
+            roleId: string | null;
+            title: string;
+            tags: string[];
+            updatedAt: number;
+          }>;
         }>;
       }>(r),
     ),

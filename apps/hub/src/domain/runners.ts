@@ -367,12 +367,16 @@ export function createManagedDispatcher(
       raw?: boolean;
       channel?: string;
       images?: string[];
+      handoffId?: string;
     },
   ) => {
     void queue.enqueue(agent.id, async () => {
       const { store } = office;
       // 先过全局并发闸门，再真正开跑
       const release = await gate.acquire();
+      if (message.handoffId) {
+        store.updateTaskHandoff(message.handoffId, { status: "running", error: null });
+      }
       store.setAgentStatus(agent.id, "busy");
       office.setActivity(
         agent.id,
@@ -461,6 +465,9 @@ export function createManagedDispatcher(
           "info",
         );
         office.event({ type: "run", agentId: agent.id, text: "执行完成，已回复并发布简报" });
+        if (message.handoffId) {
+          store.updateTaskHandoff(message.handoffId, { status: "accepted", error: null });
+        }
       } catch (error) {
         // 失败也要清收件箱，否则未读数只增不减（直连输入没有投递记录，跳过）
         if (!message.raw) store.markDeliveriesRead(agent.id);
@@ -470,6 +477,9 @@ export function createManagedDispatcher(
         const brief = truncate(raw.replaceAll(/\s+/g, " ").trim(), 160);
         const repeated = lastErrors.get(agent.id) === brief;
         lastErrors.set(agent.id, brief);
+        if (message.handoffId) {
+          store.updateTaskHandoff(message.handoffId, { status: "failed", error: brief });
+        }
         office.terminals.push(agent.id, `✗ ${brief}`, "error");
         office.event({
           type: "run-error",

@@ -8,6 +8,7 @@ import {
   type OfficeGroup,
   type OfficeRole,
   type RoleDossier,
+  type TaskHandoff,
   type TaskStatus,
 } from "@agent-office/protocol";
 import { existsSync } from "node:fs";
@@ -16,7 +17,7 @@ import type { OfficeBus } from "./bus.js";
 import { LogBook } from "./logbook.js";
 import type { OfficeStore } from "./store.js";
 import { TerminalLog } from "./terminal.js";
-import { shortId, truncate, uuid } from "../util.js";
+import { sha1, shortId, truncate, uuid } from "../util.js";
 
 export type ManagedDispatcher = (
   agent: AgentCard,
@@ -29,6 +30,8 @@ export type ManagedDispatcher = (
     channel?: string;
     /** 附图 URL（/files/xxx），派发时解析成本地路径注入提示词 */
     images?: string[];
+    /** 任务交接 ID；托管运行器据此回写 running / accepted / failed。 */
+    handoffId?: string;
   },
 ) => void;
 
@@ -73,6 +76,7 @@ export class OfficeService {
     if (!store.getAgentByName(SUPERVISOR_NAME)) {
       store.registerAgent({ name: SUPERVISOR_NAME, kind: "supervisor", status: "online" });
     }
+    store.assignRolesToUnassignedAgents();
   }
 
   /** 附图 URL（/files/xxx）→ 本地绝对路径；只认 uploads 目录下真实存在的文件 */
@@ -121,6 +125,8 @@ export class OfficeService {
     channel?: string;
     /** 附图 URL（/files/xxx） */
     images?: string[];
+    /** 任务交接 ID（内部使用） */
+    handoffId?: string;
   }): {
     messageId: string;
     routed: Array<{ name: string; mode: "managed" | "inbox" | "supervisor" }>;
@@ -192,6 +198,7 @@ export class OfficeService {
           taskId: input.taskId ?? null,
           channel,
           images: input.images,
+          handoffId: input.handoffId,
         });
       } else {
         routed.push({ name: agent.name, mode: "inbox" });
@@ -333,6 +340,248 @@ export class OfficeService {
     return updated;
   }
 
+  /**
+   * 阶段性交接并唤醒接班员工。
+   * 现有会话可续聊则转托管；无法续聊或只指定职位时，创建新的 Codex CLI 继承职位后接手。
+   */
+  handoffTask(input: {
+    fromAgent: string;
+    toAgent?: string;
+    toRole?: string;
+    taskId?: string;
+    summary: string;
+    artifacts?: string[];
+    decisions?: string[];
+    blockers?: string[];
+    nextSteps?: string[];
+    acceptanceCriteria?: string[];
+    workspace?: string;
+    spawnIfNeeded?: boolean;
+    idempotencyKey?: string;
+    channel?: string;
+  }): {
+    ok: boolean;
+    error?: string;
+    handoff?: TaskHandoff;
+    agent?: AgentCard;
+    wakeMode?: "managed" | "resumed" | "spawned";
+    duplicated?: boolean;
+  } {
+    const sourceByName = this.store.getAgentByName(input.fromAgent.trim());
+    if (!sourceByName) return { ok: false, error: `工号 ${input.fromAgent} 未登记` };
+    const source = this.store.listAgents().find((agent) => agent.id === sourceByName.id)!;
+    if (!input.toAgent?.trim() && !input.toRole?.trim()) {
+      return { ok: false, error: "to_agent 与 to_role 至少填写一个" };
+    }
+    if (input.taskId && !this.store.getTask(input.taskId)) {
+      return { ok: false, error: "任务不存在" };
+    }
+
+    const keySeed = JSON.stringify({
+      taskId: input.taskId ?? null,
+      fromAgent: source.id,
+      toAgent: input.toAgent?.trim().toLowerCase() ?? null,
+      toRole: input.toRole?.trim().toLowerCase() ?? null,
+      summary: input.summary.trim(),
+      artifacts: input.artifacts ?? [],
+      decisions: input.decisions ?? [],
+      blockers: input.blockers ?? [],
+      nextSteps: input.nextSteps ?? [],
+      acceptanceCriteria: input.acceptanceCriteria ?? [],
+    });
+    const idempotencyKey = input.idempotencyKey?.trim() || `auto:${sha1(keySeed)}`;
+    const existing = this.store.getTaskHandoffByIdempotencyKey(idempotencyKey);
+    if (existing) {
+      return {
+        ok: true,
+        handoff: existing,
+        agent: this.store.getAgentById(existing.toAgentId) ?? undefined,
+        duplicated: true,
+      };
+    }
+
+    const requestedByName = input.toAgent?.trim()
+      ? this.store.getAgentByName(input.toAgent.trim())
+      : null;
+    const requested = requestedByName
+      ? this.store.listAgents().find((agent) => agent.id === requestedByName.id) ?? requestedByName
+      : null;
+    if (requested?.id === source.id) {
+      return { ok: false, error: "交接人和接班人不能是同一名员工" };
+    }
+    if (requested && (requested.kind === "user" || requested.kind === "supervisor")) {
+      return { ok: false, error: "不能把任务交接给 boss 或主管席位" };
+    }
+
+    const explicitRole = input.toRole?.trim()
+      ? this.store
+          .listRoles()
+          .find(
+            (role) =>
+              role.id === input.toRole!.trim() ||
+              role.name.toLowerCase() === input.toRole!.trim().toLowerCase(),
+          )
+      : null;
+    if (input.toRole?.trim() && !explicitRole) {
+      return { ok: false, error: `职位「${input.toRole.trim()}」不存在` };
+    }
+    const requestedRoleId = (requested?.meta as { roleId?: string } | undefined)?.roleId;
+    const sourceRoleId = (source.meta as { roleId?: string }).roleId;
+    const inheritedRole =
+      explicitRole ??
+      (requestedRoleId ? this.store.getRoleById(requestedRoleId) : null) ??
+      (sourceRoleId ? this.store.getRoleById(sourceRoleId) : null);
+
+    let target = requested;
+    let wakeMode: "managed" | "resumed" | "spawned" = "managed";
+    if (target && MANAGED_KINDS.has(target.kind)) {
+      wakeMode = "managed";
+    } else if (target) {
+      const promoted = this.promoteAgent(target.id);
+      if (promoted.ok && promoted.agent) {
+        target = promoted.agent;
+        wakeMode = "resumed";
+      } else if (input.spawnIfNeeded !== false) {
+        target = this.spawnHandoffAgent({
+          source,
+          predecessor: target,
+          role: inheritedRole,
+          workspace: input.workspace,
+          idempotencyKey,
+        });
+        wakeMode = "spawned";
+      } else {
+        return { ok: false, error: promoted.error ?? "接班员工无法自动唤醒" };
+      }
+    } else if (input.spawnIfNeeded !== false) {
+      target = this.spawnHandoffAgent({
+        source,
+        predecessor: null,
+        role: inheritedRole,
+        workspace: input.workspace,
+        idempotencyKey,
+      });
+      wakeMode = "spawned";
+    } else {
+      return { ok: false, error: `接班员工「${input.toAgent ?? ""}」不存在` };
+    }
+
+    if (explicitRole && (target.meta as { roleId?: string }).roleId !== explicitRole.id) {
+      this.store.setAgentRole(target.id, explicitRole.id);
+      target = this.store.getAgentById(target.id)!;
+    }
+    const roleId = (target.meta as { roleId?: string }).roleId ?? inheritedRole?.id ?? null;
+    const created = this.store.createTaskHandoff({
+      taskId: input.taskId ?? null,
+      fromAgentId: source.id,
+      toAgentId: target.id,
+      requestedAgentId: requested?.id ?? null,
+      roleId,
+      summary: input.summary,
+      artifacts: input.artifacts,
+      decisions: input.decisions,
+      blockers: input.blockers,
+      nextSteps: input.nextSteps,
+      acceptanceCriteria: input.acceptanceCriteria,
+      idempotencyKey,
+    });
+    if (!created.created) {
+      return { ok: true, handoff: created.handoff, agent: target, wakeMode, duplicated: true };
+    }
+
+    this.publishBrief({
+      agentName: source.name,
+      kind: "manual",
+      source: "handoff",
+      brief: {
+        title: `交接给 ${target.name}：${truncate(input.summary.trim(), 80)}`,
+        result: input.summary.trim(),
+        decisions: input.decisions?.join("\n") || undefined,
+        artifacts: input.artifacts?.join("\n") || undefined,
+        blockers: input.blockers?.join("\n") || undefined,
+        next_steps: input.nextSteps?.join("\n") || undefined,
+        task_id: input.taskId,
+      },
+      idempotencyKey: `handoff:${idempotencyKey}`,
+    });
+
+    try {
+      const routed = this.sendMessage({
+        fromName: source.name,
+        text: formatHandoffMessage(created.handoff, target.name),
+        taskId: input.taskId ?? null,
+        channel: input.channel,
+        handoffId: created.handoff.id,
+      });
+      const mode = routed.routed.find((route) => route.name === target!.name)?.mode;
+      const handoff = this.store.updateTaskHandoff(created.handoff.id, {
+        status: mode === "managed" ? "dispatched" : "queued",
+        messageId: routed.messageId,
+      })!;
+      this.event({
+        type: "handoff",
+        agentId: source.id,
+        text: `「${source.name}」把阶段工作交接给「${target.name}」并${
+          wakeMode === "spawned" ? "创建新 CLI 唤醒" : wakeMode === "resumed" ? "续聊唤醒" : "立即唤醒"
+        }`,
+      });
+      return { ok: true, handoff, agent: target, wakeMode, duplicated: false };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const handoff = this.store.updateTaskHandoff(created.handoff.id, {
+        status: "failed",
+        error: message,
+      })!;
+      return { ok: false, error: message, handoff, agent: target, wakeMode };
+    }
+  }
+
+  private spawnHandoffAgent(input: {
+    source: AgentCard;
+    predecessor: AgentCard | null;
+    role: OfficeRole | null;
+    workspace?: string;
+    idempotencyKey: string;
+  }): AgentCard {
+    const roleLabel = (input.role?.name ?? "接班")
+      .replaceAll(/[^\p{L}\p{N}_-]+/gu, "-")
+      .replaceAll(/^-+|-+$/g, "")
+      .slice(0, 24) || "接班";
+    const name = `codex-${roleLabel}-${shortId(input.idempotencyKey, 8)}`;
+    let agent = this.store.getAgentByName(name);
+    if (!agent) {
+      const predecessorMeta = input.predecessor?.meta as { model?: string } | undefined;
+      const sourceMeta = input.source.meta as { model?: string };
+      agent = this.store.registerAgent({
+        name,
+        kind: "codex-managed",
+        workspace:
+          input.workspace?.trim() || input.predecessor?.workspace || input.source.workspace || null,
+        meta: {
+          sandbox: "workspace-write",
+          ...(predecessorMeta?.model || sourceMeta.model
+            ? { model: predecessorMeta?.model ?? sourceMeta.model }
+            : {}),
+          spawnedForHandoff: input.idempotencyKey,
+          ...(input.predecessor ? { predecessorAgentId: input.predecessor.id } : {}),
+        },
+        status: "online",
+      });
+      this.event({
+        type: "join",
+        agentId: agent.id,
+        text: `为任务交接自动创建托管 CLI「${agent.name}」`,
+      });
+    }
+    if (!MANAGED_KINDS.has(agent.kind)) {
+      throw new Error(`自动接班工号「${name}」已被非托管员工占用`);
+    }
+    if (input.role) this.store.setAgentRole(agent.id, input.role.id);
+    const groupIds = input.predecessor?.groupIds ?? input.source.groupIds ?? [];
+    if (groupIds.length > 0) this.store.setAgentGroups(agent.id, groupIds);
+    return this.store.listAgents().find((item) => item.id === agent!.id)!;
+  }
+
   // ---------- 项目组 ----------
 
   createGroup(name: string): { ok: boolean; error?: string; group?: OfficeGroup } {
@@ -384,7 +633,11 @@ export class OfficeService {
     if (!name.trim()) return { ok: false, error: "职位名不能为空" };
     const role = this.store.createRole(name, description);
     if (!role) return { ok: false, error: "职位已存在" };
-    this.event({ type: "role", text: `新建职位「${role.name}」` });
+    const assigned = this.store.assignRolesToUnassignedAgents();
+    this.event({
+      type: "role",
+      text: `新建职位「${role.name}」${assigned > 0 ? `，自动安排 ${assigned} 位未任职员工` : ""}`,
+    });
     this.emit("role", { roleId: role.id });
     return { ok: true, role };
   }
@@ -435,6 +688,7 @@ export class OfficeService {
     return {
       role,
       notes: this.store.listRoleNotes(roleId),
+      knowledge: this.store.listRoleKbDocs(roleId, 20),
       briefs: this.store.roleBriefs(roleId, 10).map((b) => ({
         agentName: b.agentName,
         title: b.title,
@@ -704,15 +958,21 @@ export class OfficeService {
         agentId: agent.id,
         text: `重启恢复：补派 ${pending.length} 条积压消息`,
       });
-      if (pending.length === 1) {
-        const only = pending[0];
-        this.managedDispatcher(agent, {
-          fromName: only.fromName,
-          text: only.text,
-          taskId: only.taskId,
-          channel: only.channel,
-          images: only.images,
-        });
+      const withHandoffs = pending.map((message) => ({
+        message,
+        handoff: this.store.getTaskHandoffByMessageId(message.messageId),
+      }));
+      if (pending.length === 1 || withHandoffs.some((item) => item.handoff)) {
+        for (const item of withHandoffs) {
+          this.managedDispatcher(agent, {
+            fromName: item.message.fromName,
+            text: item.message.text,
+            taskId: item.message.taskId,
+            channel: item.message.channel,
+            images: item.message.images,
+            handoffId: item.handoff?.id,
+          });
+        }
       } else {
         const backlog = pending.map((m) => `- ${m.fromName}：${m.text}`).join("\n");
         this.managedDispatcher(agent, {
@@ -722,6 +982,44 @@ export class OfficeService {
           images: pending.flatMap((m) => m.images),
         });
       }
+      recovered += 1;
+    }
+    return recovered;
+  }
+
+  /** 补发已持久化但尚未生成消息的交接；应在 recoverPendingDispatches 之后调用。 */
+  recoverQueuedHandoffs(): number {
+    if (!this.managedDispatcher) return 0;
+    let recovered = 0;
+    for (const handoff of this.store.listTaskHandoffs(["queued"])) {
+      const target = this.store.getAgentById(handoff.toAgentId);
+      if (!target || !MANAGED_KINDS.has(target.kind)) {
+        this.store.updateTaskHandoff(handoff.id, {
+          status: "failed",
+          error: "接班员工不存在或不是托管员工",
+        });
+        continue;
+      }
+      const existingMessageId = handoff.messageId ?? this.store.findTaskHandoffMessage(handoff.id);
+      if (existingMessageId) {
+        this.store.updateTaskHandoff(handoff.id, {
+          status: "dispatched",
+          messageId: existingMessageId,
+        });
+        recovered += 1;
+        continue;
+      }
+      const routed = this.sendMessage({
+        fromName: handoff.fromAgentName,
+        text: formatHandoffMessage(handoff, target.name),
+        taskId: handoff.taskId,
+        handoffId: handoff.id,
+      });
+      const mode = routed.routed.find((route) => route.name === target.name)?.mode;
+      this.store.updateTaskHandoff(handoff.id, {
+        status: mode === "managed" ? "dispatched" : "queued",
+        messageId: routed.messageId,
+      });
       recovered += 1;
     }
     return recovered;
@@ -913,7 +1211,9 @@ export class OfficeService {
       });
       return { doc, created: false };
     }
-    const doc = this.store.createKbDoc(input);
+    const author = input.author ? this.store.getAgentByName(input.author) : null;
+    const roleId = author ? ((author.meta as { roleId?: string }).roleId ?? null) : null;
+    const doc = this.store.createKbDoc({ ...input, roleId });
     this.emit("kb", { id: doc.id });
     this.event({
       type: "kb",
@@ -954,4 +1254,22 @@ export class OfficeService {
       kbCatalog: this.store.kbCatalog(),
     };
   }
+}
+
+function formatHandoffMessage(handoff: TaskHandoff, targetName: string): string {
+  const lines = [
+    `@${targetName} [任务交接] 请立即接手并先分析现状。`,
+    `[交接ID:${handoff.id}]`,
+    `来源：${handoff.fromAgentName}`,
+    `已完成：${handoff.summary}`,
+  ];
+  if (handoff.artifacts.length > 0) lines.push(`产物：\n- ${handoff.artifacts.join("\n- ")}`);
+  if (handoff.decisions.length > 0) lines.push(`关键决策：\n- ${handoff.decisions.join("\n- ")}`);
+  if (handoff.blockers.length > 0) lines.push(`阻塞：\n- ${handoff.blockers.join("\n- ")}`);
+  if (handoff.nextSteps.length > 0) lines.push(`下一步：\n- ${handoff.nextSteps.join("\n- ")}`);
+  if (handoff.acceptanceCriteria.length > 0) {
+    lines.push(`验收条件：\n- ${handoff.acceptanceCriteria.join("\n- ")}`);
+  }
+  lines.push("请结合当前职位档案与同岗知识库继续工作，开始后更新任务状态，完成后发布简报。");
+  return lines.join("\n\n");
 }

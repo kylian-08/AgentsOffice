@@ -14,11 +14,15 @@ import type {
   OfficeRole,
   OfficeTask,
   RoleNote,
+  TaskHandoff,
+  TaskHandoffStatus,
   TaskStatus,
 } from "@agent-office/protocol";
 import { now, uuid } from "../util.js";
+import { applyMigrations } from "./migrations.js";
 
-const SCHEMA = `
+/** 基础表结构（不含演进列，列演进一律走 migrations.ts 的版本化迁移） */
+export const SCHEMA = `
 CREATE TABLE IF NOT EXISTS agents(
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL COLLATE NOCASE UNIQUE,
@@ -182,40 +186,8 @@ export class OfficeStore {
     this.db = new DatabaseSync(dbPath);
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec(SCHEMA);
-    // 旧库迁移：消息记录发件人名字快照，员工删除后历史仍可读
-    try {
-      this.db.exec("ALTER TABLE messages ADD COLUMN from_name TEXT");
-    } catch {
-      /* 列已存在 */
-    }
-    // 旧库迁移：消息频道
-    try {
-      this.db.exec("ALTER TABLE messages ADD COLUMN channel TEXT NOT NULL DEFAULT 'hall'");
-    } catch {
-      /* 列已存在 */
-    }
-    // 旧库迁移：消息附图（URL 数组）
-    try {
-      this.db.exec("ALTER TABLE messages ADD COLUMN images TEXT NOT NULL DEFAULT '[]'");
-    } catch {
-      /* 列已存在 */
-    }
-    // 旧库迁移：单组时代的 agents.group_id 搬进多对多关系表后废弃
-    try {
-      this.db.exec(
-        `INSERT OR IGNORE INTO group_members(group_id, agent_id)
-         SELECT group_id, id FROM agents WHERE group_id IS NOT NULL`,
-      );
-      this.db.exec("UPDATE agents SET group_id = NULL WHERE group_id IS NOT NULL");
-    } catch {
-      /* 旧列不存在（新库），无需迁移 */
-    }
-    // 旧库迁移：简报打职位标（发布时在岗职位，供接任者追溯）
-    try {
-      this.db.exec("ALTER TABLE briefs ADD COLUMN role_id TEXT");
-    } catch {
-      /* 列已存在 */
-    }
+    // 版本化迁移：老库缺哪个补哪个，已存在的结构只打标不重复执行（见 migrations.ts）
+    applyMigrations(this.db);
   }
 
   close(): void {
@@ -245,6 +217,7 @@ export class OfficeStore {
           now(),
           existing.id,
         );
+      this.autoAssignAgentRole(existing.id);
       return this.getAgentById(existing.id)!;
     }
     const id = uuid();
@@ -263,6 +236,7 @@ export class OfficeStore {
         now(),
         now(),
       );
+    this.autoAssignAgentRole(id);
     return this.getAgentById(id)!;
   }
 
@@ -447,6 +421,31 @@ export class OfficeStore {
     }));
   }
 
+  /**
+   * 自动选岗：普通员工注册时进入当前人数最少的职位；同人数按职位创建顺序选择。
+   * 已有人工任命永不覆盖，user / supervisor 不占用业务职位。
+   */
+  private autoAssignAgentRole(agentId: string): OfficeRole | null {
+    const agent = this.getAgentById(agentId);
+    if (!agent || agent.kind === "user" || agent.kind === "supervisor") return null;
+    if ((agent.meta as { roleId?: string }).roleId) return null;
+    const role = this.listRoles().sort((a, b) => {
+      const holderDiff = (a.holderNames?.length ?? 0) - (b.holderNames?.length ?? 0);
+      return holderDiff || a.createdAt - b.createdAt;
+    })[0];
+    if (!role || !this.setAgentRole(agentId, role.id)) return null;
+    return role;
+  }
+
+  /** Hub 启动或新建职位时，为历史未任职员工补齐职位。 */
+  assignRolesToUnassignedAgents(): number {
+    let assigned = 0;
+    for (const agent of this.listAgents()) {
+      if (this.autoAssignAgentRole(agent.id)) assigned += 1;
+    }
+    return assigned;
+  }
+
   /** 删除职位：清空在岗者的任职、连带删除档案笔记与定向消息索引 */
   deleteRole(id: string): boolean {
     const role = this.getRoleById(id);
@@ -458,6 +457,8 @@ export class OfficeStore {
     }
     this.db.prepare("DELETE FROM role_notes WHERE role_id = ?").run(id);
     this.db.prepare("DELETE FROM role_messages WHERE role_id = ?").run(id);
+    // 知识库内容不随职位删除，转为全办公室公共知识。
+    this.db.prepare("UPDATE kb_docs SET role_id = NULL WHERE role_id = ?").run(id);
     this.db.prepare("DELETE FROM roles WHERE id = ?").run(id);
     return true;
   }
@@ -748,6 +749,7 @@ export class OfficeStore {
           .prepare("UPDATE agents SET last_seen_at = ?, status = ? WHERE id = ?")
           .run(now(), "online", agent.id);
         if (defaults.meta) this.updateAgentMeta(agent.id, defaults.meta);
+        this.autoAssignAgentRole(agent.id);
         return this.getAgentById(agent.id)!;
       }
     }
@@ -984,6 +986,147 @@ export class OfficeStore {
     return this.getTask(id);
   }
 
+  // ---------- Task handoffs ----------
+
+  /** 原子保存交接并把任务负责人转给接班员工；幂等键相同不会重复创建。 */
+  createTaskHandoff(input: {
+    taskId?: string | null;
+    fromAgentId: string;
+    toAgentId: string;
+    requestedAgentId?: string | null;
+    roleId?: string | null;
+    summary: string;
+    artifacts?: string[];
+    decisions?: string[];
+    blockers?: string[];
+    nextSteps?: string[];
+    acceptanceCriteria?: string[];
+    idempotencyKey: string;
+  }): { handoff: TaskHandoff; created: boolean } {
+    const existing = this.getTaskHandoffByIdempotencyKey(input.idempotencyKey);
+    if (existing) return { handoff: existing, created: false };
+    const fromAgent = this.getAgentById(input.fromAgentId);
+    const toAgent = this.getAgentById(input.toAgentId);
+    if (!fromAgent || !toAgent) throw new Error("交接员工或接班员工不存在");
+
+    const id = uuid();
+    const t = now();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO task_handoffs(
+             id, task_id, from_agent_id, from_agent_name, to_agent_id, to_agent_name,
+             requested_agent_id, role_id,
+             status, summary, artifacts, decisions, blockers, next_steps,
+             acceptance_criteria, idempotency_key, message_id, error, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
+        )
+        .run(
+          id,
+          input.taskId ?? null,
+          input.fromAgentId,
+          fromAgent.name,
+          input.toAgentId,
+          toAgent.name,
+          input.requestedAgentId ?? null,
+          input.roleId ?? null,
+          input.summary.trim(),
+          JSON.stringify(input.artifacts ?? []),
+          JSON.stringify(input.decisions ?? []),
+          JSON.stringify(input.blockers ?? []),
+          JSON.stringify(input.nextSteps ?? []),
+          JSON.stringify(input.acceptanceCriteria ?? []),
+          input.idempotencyKey,
+          t,
+          t,
+        );
+      if (input.taskId) {
+        this.db
+          .prepare(
+            `UPDATE tasks SET status = 'in_progress', assignee_agent_id = ?, updated_at = ?
+             WHERE id = ?`,
+          )
+          .run(input.toAgentId, t, input.taskId);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return { handoff: this.getTaskHandoff(id)!, created: true };
+  }
+
+  getTaskHandoff(id: string): TaskHandoff | null {
+    const row = this.db
+      .prepare(
+        `SELECT h.*, r.name AS role_name
+         FROM task_handoffs h
+         LEFT JOIN roles r ON r.id = h.role_id
+         WHERE h.id = ?`,
+      )
+      .get(id) as Record<string, unknown> | undefined;
+    return row ? handoffFromRow(row) : null;
+  }
+
+  getTaskHandoffByIdempotencyKey(key: string): TaskHandoff | null {
+    const row = this.db
+      .prepare("SELECT id FROM task_handoffs WHERE idempotency_key = ?")
+      .get(key) as { id: string } | undefined;
+    return row ? this.getTaskHandoff(row.id) : null;
+  }
+
+  getTaskHandoffByMessageId(messageId: string): TaskHandoff | null {
+    const row = this.db
+      .prepare("SELECT id FROM task_handoffs WHERE message_id = ?")
+      .get(messageId) as { id: string } | undefined;
+    return row ? this.getTaskHandoff(row.id) : null;
+  }
+
+  listTaskHandoffs(statuses?: TaskHandoffStatus[], limit = 100): TaskHandoff[] {
+    const rows = statuses && statuses.length > 0
+      ? (this.db
+          .prepare(
+            `SELECT id FROM task_handoffs
+             WHERE status IN (${statuses.map(() => "?").join(", ")})
+             ORDER BY created_at ASC LIMIT ?`,
+          )
+          .all(...statuses, limit) as unknown as Array<{ id: string }>)
+      : (this.db
+          .prepare("SELECT id FROM task_handoffs ORDER BY created_at DESC LIMIT ?")
+          .all(limit) as unknown as Array<{ id: string }>);
+    return rows.map((row) => this.getTaskHandoff(row.id)!).filter(Boolean);
+  }
+
+  updateTaskHandoff(
+    id: string,
+    patch: { status?: TaskHandoffStatus; messageId?: string | null; error?: string | null },
+  ): TaskHandoff | null {
+    const existing = this.getTaskHandoff(id);
+    if (!existing) return null;
+    this.db
+      .prepare(
+        `UPDATE task_handoffs SET status = ?, message_id = ?, error = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(
+        patch.status ?? existing.status,
+        patch.messageId === undefined ? existing.messageId : patch.messageId,
+        patch.error === undefined ? existing.error : patch.error,
+        now(),
+        id,
+      );
+    return this.getTaskHandoff(id);
+  }
+
+  /** 进程可能在消息落库后、交接关联回写前退出；用稳定标记找回消息。 */
+  findTaskHandoffMessage(handoffId: string): string | null {
+    const row = this.db
+      .prepare("SELECT id FROM messages WHERE instr(text, ?) > 0 ORDER BY created_at ASC LIMIT 1")
+      .get(`[交接ID:${handoffId}]`) as { id: string } | undefined;
+    return row?.id ?? null;
+  }
+
   // ---------- Briefs ----------
 
   /** 幂等写入简报；idempotencyKey 冲突时返回 null（表示已存在） */
@@ -1131,15 +1274,17 @@ export class OfficeStore {
     content: string;
     tags?: string[];
     author?: string | null;
+    roleId?: string | null;
   }): KbDoc {
     const id = uuid();
     this.db
       .prepare(
-        `INSERT INTO kb_docs(id, category, title, content, tags, author, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO kb_docs(id, role_id, category, title, content, tags, author, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
+        input.roleId ?? null,
         input.category.trim(),
         input.title.trim(),
         input.content,
@@ -1188,23 +1333,24 @@ export class OfficeStore {
   /** 目录索引：分类 → 文档标题清单（不含正文，供快速索引） */
   kbCatalog(): Array<{
     category: string;
-    docs: Array<{ id: string; title: string; tags: string[]; updatedAt: number }>;
+    docs: Array<{ id: string; roleId: string | null; title: string; tags: string[]; updatedAt: number }>;
   }> {
     const rows = this.db
       .prepare(
-        `SELECT id, category, title, tags, updated_at FROM kb_docs
+        `SELECT id, role_id, category, title, tags, updated_at FROM kb_docs
          ORDER BY category ASC, updated_at DESC`,
       )
       .all() as unknown as Array<Record<string, unknown>>;
     const byCategory = new Map<
       string,
-      Array<{ id: string; title: string; tags: string[]; updatedAt: number }>
+      Array<{ id: string; roleId: string | null; title: string; tags: string[]; updatedAt: number }>
     >();
     for (const row of rows) {
       const category = row.category as string;
       const list = byCategory.get(category) ?? [];
       list.push({
         id: row.id as string,
+        roleId: (row.role_id as string) ?? null,
         title: row.title as string,
         tags: JSON.parse((row.tags as string) ?? "[]"),
         updatedAt: row.updated_at as number,
@@ -1237,16 +1383,51 @@ export class OfficeStore {
           .all(limit) as unknown as Array<Record<string, unknown>>);
     return rows.map(kbFromRow);
   }
+
+  /** 某职位成员共同沉淀的知识（新→老）。 */
+  listRoleKbDocs(roleId: string, limit = 20): KbDoc[] {
+    const rows = this.db
+      .prepare("SELECT * FROM kb_docs WHERE role_id = ? ORDER BY updated_at DESC LIMIT ?")
+      .all(roleId, limit) as unknown as Array<Record<string, unknown>>;
+    return rows.map(kbFromRow);
+  }
 }
 
 function kbFromRow(row: Record<string, unknown>): KbDoc {
   return {
     id: row.id as string,
+    roleId: (row.role_id as string) ?? null,
     category: row.category as string,
     title: row.title as string,
     content: row.content as string,
     tags: JSON.parse((row.tags as string) ?? "[]"),
     author: (row.author as string) ?? null,
+    createdAt: row.created_at as number,
+    updatedAt: row.updated_at as number,
+  };
+}
+
+function handoffFromRow(row: Record<string, unknown>): TaskHandoff {
+  return {
+    id: row.id as string,
+    taskId: (row.task_id as string) ?? null,
+    fromAgentId: row.from_agent_id as string,
+    fromAgentName: row.from_agent_name as string,
+    toAgentId: row.to_agent_id as string,
+    toAgentName: row.to_agent_name as string,
+    requestedAgentId: (row.requested_agent_id as string) ?? null,
+    roleId: (row.role_id as string) ?? null,
+    roleName: (row.role_name as string) ?? null,
+    status: row.status as TaskHandoffStatus,
+    summary: row.summary as string,
+    artifacts: JSON.parse((row.artifacts as string) ?? "[]"),
+    decisions: JSON.parse((row.decisions as string) ?? "[]"),
+    blockers: JSON.parse((row.blockers as string) ?? "[]"),
+    nextSteps: JSON.parse((row.next_steps as string) ?? "[]"),
+    acceptanceCriteria: JSON.parse((row.acceptance_criteria as string) ?? "[]"),
+    idempotencyKey: row.idempotency_key as string,
+    messageId: (row.message_id as string) ?? null,
+    error: (row.error as string) ?? null,
     createdAt: row.created_at as number,
     updatedAt: row.updated_at as number,
   };

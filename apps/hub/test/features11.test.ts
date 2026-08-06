@@ -20,6 +20,48 @@ function makeOffice() {
 }
 
 describe("职位与岗位档案交接", () => {
+  it("注册自动均衡分配职位，允许多人同岗且保留人工任命", () => {
+    const office = makeOffice();
+    const development = office.createRole("开发", "负责功能实现").role!;
+    const testing = office.createRole("测试", "负责质量保障").role!;
+
+    const first = office.store.registerAgent({ name: "codex-开发1", kind: "codex-cli" });
+    const second = office.store.registerAgent({ name: "claude-测试1", kind: "claude-cli" });
+    const third = office.store.registerAgent({ name: "cursor-开发2", kind: "cursor-ide" });
+
+    expect((first.meta as { roleId?: string }).roleId).toBe(development.id);
+    expect((second.meta as { roleId?: string }).roleId).toBe(testing.id);
+    expect((third.meta as { roleId?: string }).roleId).toBe(development.id);
+    expect(office.store.getRoleById(development.id)).not.toBeNull();
+    expect(office.store.listRoles().find((r) => r.id === development.id)?.holderNames).toEqual([
+      "codex-开发1",
+      "cursor-开发2",
+    ]);
+
+    expect(office.assignRole(third.id, testing.id).ok).toBe(true);
+    const registeredAgain = office.store.registerAgent({
+      name: third.name,
+      kind: third.kind,
+      workspace: "D:/new-workspace",
+    });
+    expect((registeredAgain.meta as { roleId?: string }).roleId).toBe(testing.id);
+    expect((registeredAgain.meta as { title?: string }).title).toBe("测试");
+  });
+
+  it("Hub 启动和新建职位会为历史未任职员工补分配", () => {
+    const store = new OfficeStore(":memory:");
+    const office = new OfficeService(store, new OfficeBus());
+    const legacy = store.registerAgent({ name: "codex-历史员工", kind: "codex-cli" });
+    expect((legacy.meta as { roleId?: string }).roleId).toBeUndefined();
+
+    const role = office.createRole("维护").role!;
+    expect((store.getAgentById(legacy.id)!.meta as { roleId?: string }).roleId).toBe(role.id);
+
+    store.setAgentRole(legacy.id, null);
+    new OfficeService(store, new OfficeBus());
+    expect((store.getAgentById(legacy.id)!.meta as { roleId?: string }).roleId).toBe(role.id);
+  });
+
   it("职位 CRUD 与任免：接任同步 title，卸任清除", () => {
     const office = makeOffice();
     const created = office.createRole("测试", "负责回归与验收");
@@ -44,7 +86,7 @@ describe("职位与岗位档案交接", () => {
     expect((fresh.meta as { title?: string }).title).toBeUndefined();
   });
 
-  it("岗位档案：笔记、定向消息、历任简报都跟职位走，接任者完整继承", () => {
+  it("岗位档案：笔记、知识库、定向消息和历任简报由同岗成员共享", () => {
     const office = makeOffice();
     const role = office.createRole("git 库管理").role!;
     const codex = office.store.registerAgent({ name: "codex-1", kind: "codex-cli" });
@@ -62,6 +104,14 @@ describe("职位与岗位档案交接", () => {
     });
     expect(noteResult.ok).toBe(true);
 
+    const knowledge = office.kbWrite({
+      category: "仓库维护",
+      title: "迁移操作手册",
+      content: "先冻结写入，再镜像仓库并校验 commit 数量",
+      author: "codex-1",
+    })!.doc;
+    expect(knowledge.roleId).toBe(role.id);
+
     // 在岗者发简报（打上职位标）
     office.publishBrief({
       agentName: "codex-1",
@@ -75,6 +125,7 @@ describe("职位与岗位档案交接", () => {
     const dossier = office.roleDossier(role.id)!;
     expect(dossier.notes).toHaveLength(1);
     expect(dossier.notes[0].content).toContain("monorepo");
+    expect(dossier.knowledge.map((k) => k.title)).toContain("迁移操作手册");
     expect(dossier.messages.some((m) => m.text.includes("s3cret"))).toBe(true);
     expect(dossier.briefs.some((b) => b.title === "完成仓库迁移")).toBe(true);
 
@@ -83,6 +134,7 @@ describe("职位与岗位档案交接", () => {
     expect(office.assignRole(claude.id, role.id).ok).toBe(true);
     const inherited = office.agentRoleDossier(office.store.getAgentById(claude.id)!)!;
     expect(inherited.notes[0].title).toBe("仓库架构");
+    expect(inherited.knowledge[0].content).toContain("校验 commit");
     expect(inherited.messages.some((m) => m.text.includes("s3cret"))).toBe(true);
   });
 
@@ -106,11 +158,19 @@ describe("职位与岗位档案交接", () => {
       content: "Flask 6000 端口 + GPU 网关",
       author: "前任",
     });
+    office.kbWrite({
+      category: "架构",
+      title: "GPU 网关排障",
+      content: "先检查 6000 端口，再检查任务队列",
+      author: "claude-2",
+    });
 
     office.sendMessage({ fromName: "老板", text: "@claude-2 继续分析架构" });
     await vi.waitFor(() => expect(prompts).toHaveLength(1));
     expect(prompts[0]).toContain("架构分析");
     expect(prompts[0]).toContain("服务端拓扑");
+    expect(prompts[0]).toContain("GPU 网关排障");
+    expect(prompts[0]).toContain("先检查 6000 端口");
     expect(prompts[0]).toContain("role_note_write");
   });
 
@@ -125,10 +185,17 @@ describe("职位与岗位档案交接", () => {
     const agent = office.store.registerAgent({ name: "codex-x", kind: "codex-managed" });
     office.assignRole(agent.id, role.id);
     office.writeRoleNote({ roleId: role.id, title: "n", content: "c" });
+    const knowledge = office.kbWrite({
+      category: "临时",
+      title: "仍需保留的知识",
+      content: "职位撤销后转为公共知识",
+      author: "codex-x",
+    })!.doc;
 
     expect(office.deleteRole(role.id).ok).toBe(true);
     expect(office.store.listRoles()).toHaveLength(0);
     expect(office.store.listRoleNotes(role.id)).toHaveLength(0);
+    expect(office.store.getKbDoc(knowledge.id)?.roleId).toBeNull();
     const fresh = office.store.getAgentById(agent.id)!;
     expect((fresh.meta as { roleId?: string }).roleId).toBeUndefined();
   });

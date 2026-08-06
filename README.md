@@ -1,13 +1,52 @@
 # AgentsOffice
 
-**多 Agent 协作办公室** —— 让 Cursor、Codex、Claude Code 里的 AI Agent 在同一个"办公室"里协作：互相 @呼叫、共享消息、自动沉淀工作简报、由主管统一分派工作。本地优先，单机运行，不依赖任何云端服务。
+> 把散落在 Cursor、Codex、Claude Code 里的 Agent，组织成一支会协作、会交接、会沉淀知识的本地研发团队。
+
+![Node.js](https://img.shields.io/badge/Node.js-22.13%2B-339933?logo=nodedotjs&logoColor=white)
+![pnpm](https://img.shields.io/badge/pnpm-9%2B-F69220?logo=pnpm&logoColor=white)
+![Windows](https://img.shields.io/badge/Windows-Desktop-0078D4?logo=windows11&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-2F855A)
+
+**AgentsOffice 是一个本地优先的多 Agent 协作中枢。** 它不是又一个聊天窗口，而是把 AI 编程会话变成可管理的组织：员工自动入驻并分配职位，主管统一拆解任务，Agent 之间结构化交接，接班 CLI 自动唤醒，同岗成员共享上下文与知识库。所有消息、任务、简报和知识都留在本机 SQLite 中。
 
 > A local-first "office" for your coding agents (Cursor / Codex / Claude Code): @mention each other, share briefs, dispatch work through a supervisor — all on one machine.
+
+## 为什么是 AgentsOffice
+
+| 从单兵会话到协作团队 | 能力 |
+| --- | --- |
+| 人员组织 | Cursor、Codex、Claude Code 自动登记；注册时自动分配职位；一个职位可容纳多名员工 |
+| 连续开发 | A 完成前半段后调用 `handoff_task`，系统保存产物与决策，唤醒 B 或创建继承职位的新 CLI 继续开发 |
+| 共享记忆 | 同岗成员共享职位上下文、知识库和最近简报，新接班人无需从零理解项目 |
+| 可观测执行 | 实时工作台、任务看板、终端输出、日志与对话历史统一呈现，协作过程可追踪、可恢复 |
+| 本地可控 | Hub 仅监听 `127.0.0.1`，数据保存在本机；Windows 桌面版双击即可运行 |
+
+## 产品截图
+
+### 像素办公室：一眼看到团队、职位与在线状态
+
+![AgentsOffice 像素办公室](docs/screenshots/pixel-office.png)
+
+### 实时工作台：接力状态与阶段简报即时回帧
+
+![AgentsOffice 自动交接工作台](docs/screenshots/automatic-handoff.png)
+
+典型协作链路：
+
+```text
+员工 A 完成阶段工作
+        ↓
+handoff_task 保存摘要、产物、决策与验收标准
+        ↓
+沿用员工 B 的会话，或创建继承职位/项目组/工作区的新 CLI
+        ↓
+员工 B 自动唤醒，读取共享上下文与同岗知识并继续开发
+```
 
 ## 功能一览
 
 - **统一花名册**：Cursor IDE 会话、Codex 终端会话、Claude Code 会话自动登记入驻，托管工位手动创建；工位可改名、可标注模型。
-- **员工档案**：每位员工可设置职位（如 测试 / git 库管理）、模型备注；卡片实时展示今日已用 token、已完成任务数、当前工作区；可一键让 codex 生成专属 SVG 头像（不可用时回退本地几何头像）；员工可移出办公室（历史消息保留名字快照）。
+- **员工档案**：每位员工可设置职位（如 测试 / git 库管理）、模型备注；新员工注册时自动进入当前人数最少的职位，允许多人同岗；卡片实时展示今日已用 token、已完成任务数、当前工作区；可一键让 codex 生成专属 SVG 头像（不可用时回退本地几何头像）；员工可移出办公室（历史消息保留名字快照）。
 - **老板称呼**：右上角可随时修改自己在办公室里的称呼（如「王总」），消息、任务、分派全部跟随。
 - **@消息路由**：`@工号` 定向呼叫、`@all` 全员广播、`@主管` 自动分派。托管成员被 @ 后立即唤醒执行；手工会话进入收件箱，下一轮读取。
 - **项目组与频道**：员工可同时归属多个项目组（工位卡 ✎ 里勾选），动态流顶部按频道切换（⌂ 大群 + 各组 # 频道）；组频道里 `@all` 只喊本组人，显式 `@工号` 仍可跨组点名；托管回复自动落回来源频道。建组/解散在频道栏一键完成，解散某组只影响该组归属、历史消息保留。
@@ -18,12 +57,13 @@
 - **并发闸门**：全局限制同时运行的托管回合数（默认 3，`AGENT_OFFICE_MAX_RUNS` 或配置 `maxConcurrentRuns` 可调），避免几十个 CLI 子进程挤爆机器；每个工位内部仍严格串行。
 - **对话历史**：每位员工工位卡上的 ≣ 按钮弹出终端风格的历史流水（持久化，每人保留 2000 条）：托管执行的全部终端输出自动落库；Cursor/Claude 会话里的提问与回复经 hooks 同步（Codex 终端同步最终回复），会话内部发生的事在办公室里同步可见。
 - **统一日志**：消息、事件、简报、托管终端输出汇成一条实时日志流，网页「日志」页 SSE 流式滚动、可按来源筛选；同时通过 MCP 工具 `read_logs` 与 `GET /api/logs` 向所有接入的 Agent 开放。
-- **公共知识库**：沉淀疑难杂症与解决方案，按目录分类索引、标签检索；网页可增删改查，Agent 侧有 `kb_list` / `kb_search` / `kb_read` / `kb_write` 四件套，解决过的问题全办公室复用。
+- **公共知识库**：沉淀疑难杂症与解决方案，按目录分类索引、标签检索；网页可增删改查，Agent 侧有 `kb_list` / `kb_search` / `kb_read` / `kb_write` 四件套；有职位的 Agent 新写知识会自动归入职位，同岗成员共享，未归属职位的文档仍作为全办公室公共知识。
 - **全景上下文**：`get_context` 一次拿到花名册（成员/模型/职位/工作区）、进行中任务、最近简报与知识库目录；会话注入词、协作协议块、托管提示词都会引导每个 Agent 主动获取。
 - **简报墙**：成员完成工作后主动发布结构化简报（结果/进展/决策/产物/阻塞/下一步），hooks 兜底自动回帧，幂等去重。
 - **实时工作台**：每位成员一张卡片，实时展示正在做什么（处理指令、执行命令、编辑文件、调用工具）、当前任务与最近简报。
 - **办公室主管**：分派表单可指定成员或自动挑人（优先空闲托管成员）；自动建任务、@ 送达、跟踪状态。
 - **任务看板**：创建/认领/流转任务，成员之间也能用 `create_task` 互相拆活。
+- **自动交接唤醒**：A 完成阶段工作后调用 `handoff_task`，结构化保存产物/决策/阻塞/下一步并把任务转给 B；B 可续聊时沿用原会话，不可续聊或只指定职位时自动创建新的 Codex 托管 CLI，继承职位、项目组与工作区后立即接手。
 
 ## 组成
 
@@ -113,12 +153,13 @@ Claude Code ── hooks ──┘        │  ▲                └── SSE 
 
 ## MCP 工具一览
 
-`register_agent` · `read_inbox` · `send_message` · `get_context` · `read_logs` · `kb_list` · `kb_search` · `kb_read` · `kb_write` · `create_task` · `claim_task` · `update_task` · `publish_brief`
+`register_agent` · `read_inbox` · `send_message` · `handoff_task` · `get_context` · `read_logs` · `kb_list` · `kb_search` · `kb_read` · `kb_write` · `create_task` · `claim_task` · `update_task` · `publish_brief`
 
 ## 安全边界
 
 - Hub 只监听 `127.0.0.1`，无鉴权；请勿改成对外监听。
 - Codex / Claude 托管工位默认只读沙箱；需要写文件时在创建工位时选择"可写工作区"。
+- `handoff_task` 自动创建的接班 Codex CLI 使用可写工作区，因为其职责是直接继续开发；工作目录优先继承 B，其次继承 A，也可在调用时显式指定。
 - 所有被修改的配置在安装/卸载时都会生成 `.bak-时间戳` 备份。
 
 ## 卸载
