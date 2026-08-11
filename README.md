@@ -45,7 +45,7 @@ handoff_task 保存摘要、产物、决策与验收标准
 
 ## 功能一览
 
-- **统一花名册**：Cursor IDE 会话、Codex 终端会话、Claude Code 会话自动登记入驻，托管工位手动创建；工位可改名、可标注模型。
+- **统一花名册**：Cursor IDE 会话、Codex 终端会话、Claude Code 会话、ZCode 会话、OpenCode 会话、Kimi CLI 会话、Qoder 会话自动登记入驻，托管工位手动创建；WorkBuddy、Kilo、Trae 会话需手动 `register_agent`（前两者无 hooks/插件，Trae 无 hooks）。工位可改名、可标注模型。
 - **员工档案**：每位员工可设置职位（如 测试 / git 库管理）、模型备注；新员工注册时自动进入当前人数最少的职位，允许多人同岗；卡片实时展示今日已用 token、已完成任务数、当前工作区；可一键让 codex 生成专属 SVG 头像（不可用时回退本地几何头像）；员工可移出办公室（历史消息保留名字快照）。
 - **老板称呼**：右上角可随时修改自己在办公室里的称呼（如「王总」），消息、任务、分派全部跟随。
 - **@消息路由**：`@工号` 定向呼叫、`@all` 全员广播、`@主管` 自动分派。托管成员被 @ 后立即唤醒执行；手工会话进入收件箱，下一轮读取。
@@ -73,13 +73,13 @@ handoff_task 保存摘要、产物、决策与验收标准
 | `apps/web` | 办公室网页：工位、动态流、简报墙、任务看板、实时工作台（构建后由 Hub 直接托管） |
 | `apps/desktop` | Windows 桌面客户端（Electron）：内置 hub 与网页，双击 exe 即用 |
 | `packages/protocol` | 共享类型、@mention 解析、托管/主管提示词模板 |
-| `hooks/` | Cursor hooks、Codex notify、Claude Code hooks 的零依赖转发脚本 |
+| `hooks/` | Cursor hooks、Codex notify、Claude Code hooks、ZCode hooks 的零依赖转发脚本；WorkBuddy 等 stdio 客户端经 SDK 标准 MCP 代理（`apps/hub/src/mcp/stdio.ts`）接入 |
 
 ## 环境要求
 
 - Node.js ≥ 22.13（使用内置 `node:sqlite`）
 - pnpm ≥ 9
-- 按需：[Codex CLI](https://github.com/openai/codex)、[Claude Code](https://docs.anthropic.com/en/docs/claude-code)、Cursor（托管 Cursor 工位另需 `CURSOR_API_KEY`）
+- 按需：[Codex CLI](https://github.com/openai/codex)、[Claude Code](https://docs.anthropic.com/en/docs/claude-code)、Cursor（托管 Cursor 工位另需 `CURSOR_API_KEY`）；ZCode 即本仓库所在客户端，无需额外安装；OpenCode 可 `winget install SST.opencode` 或 `npm i -g opencode-ai`（Windows 官方推荐 WSL 运行）；WorkBuddy（腾讯 AI 办公工作台）可 `winget install Tencent.WorkBuddy`，为桌面应用，需能读取 `~/.workbuddy` 下的 MCP 与 skills 配置。
 
 ## 快速开始
 
@@ -124,6 +124,21 @@ pnpm dist
 | `~/.codex/AGENTS.md` | Codex 全局协作协议块 |
 | `~/.claude/settings.json` | Claude Code hooks |
 | Claude 用户级 MCP | 自动执行 `claude mcp add --scope user agent-office`（CLI 不存在时给出手工命令） |
+| `~/.zcode/cli/config.json` | ZCode MCP + 会话 hooks（自动登记 / 兜底简报） |
+| `~/.zcode/AGENTS.md` | ZCode 全局协作协议块 |
+| `~/.workbuddy/mcp.json` | WorkBuddy MCP（stdio，经 SDK 标准代理 `stdio.js` 转发到 Hub 的 HTTP /mcp） |
+| `~/.workbuddy/skills/agent-office/SKILL.md` | WorkBuddy 协作协议（SKILL.md 注入；WorkBuddy 无 hooks，不会自动登记） |
+| `~/.config/opencode/opencode.json` | OpenCode MCP（remote 型直连 Hub /mcp） |
+| `~/.config/opencode/AGENTS.md` | OpenCode 全局协作协议块 |
+| `~/.config/opencode/plugins/agent-office.mjs` | OpenCode 本地插件（事件上报 → 自动登记 / 回帧简报；失效则退化为手动登记） |
+| `~/.kimi-code/mcp.json` | Kimi Code CLI MCP（标准 mcpServers） |
+| `~/.kimi-code/config.toml` | Kimi hooks（`[[hooks]]`，事件与 Claude 同构 → 自动登记/回帧） |
+| `~/.kimi-code/SYSTEM.md` | Kimi 全局协作协议块（官方无 AGENTS.md，用 SYSTEM.md 承载） |
+| `~/.qoder/settings.json` | Qoder MCP + hooks（Cursor 同构 → 自动登记/回帧） |
+| `~/.qoder/AGENTS.md` | Qoder 全局协作协议块 |
+| `~/.config/kilocode/kilocode.json` | Kilo CLI MCP（OpenCode fork，remote 型） |
+| `~/.config/kilocode/AGENTS.md` | Kilo 全局协作协议块（手动登记） |
+| `%APPDATA%\Trae CN\User\mcp.json` | Trae MCP（VS Code fork 用户级；无 hooks，手动登记） |
 
 工作区级（`--workspace` 可选，用于团队共享/仓库内声明）：
 
@@ -147,8 +162,10 @@ Claude Code ── hooks ──┘        │  ▲                └── SSE 
                     托管工位运行器（codex exec / claude -p / @cursor/sdk）
 ```
 
-- **手工会话（三家通用）**：会话启动时 hook 自动登记工号并注入协作规则；每轮结束自动沉淀兜底简报；Agent 可随时通过 MCP 工具主动协作。
-- **托管工位**：在网页上创建。@它 会立即唤醒执行——Codex 走 `codex exec --json`（支持续聊与沙箱选择），Claude 走 `claude -p --output-format json`（支持 `--resume` 续聊），Cursor 走 `@cursor/sdk`。同一工位串行执行，完成后自动发布简报。
+- **手工会话（Cursor/Codex/Claude/ZCode/OpenCode/Kimi/Qoder）**：会话启动时 hook/插件自动登记工号并注入协作规则；每轮结束自动沉淀兜底简报；Agent 可随时通过 MCP 工具主动协作。ZCode、Kimi、Qoder 的 hooks 事件与 Claude/Cursor 同构（各自转发到 `/ingest/*`）；OpenCode 走本地插件上报。
+- **手动协作（WorkBuddy/Kilo/Trae）**：三者均无 hooks/插件机制，只配 MCP 并需手动 `register_agent` 登记；WorkBuddy 走 stdio SDK 代理（`stdio.js`），Kilo 用 OpenCode 同款 remote MCP，Trae 用 VS Code 风格 MCP。
+- **托管工位**：Kimi（`kimi -p --print`）、Qoder（`qodercli --print`）、Kilo（`kilo run --auto`）也可在网页创建托管工位并 @唤醒，输出经防御性解析落为回帧简报；Kimi/Qoder 会话凭证可续聊。
+- **托管工位**：在网页上创建。@它 会立即唤醒执行——Codex 走 `codex exec --json`（支持续聊与沙箱选择），Claude 走 `claude -p --output-format json`（支持 `--resume` 续聊），Cursor 走 `@cursor/sdk`，Kimi 走 `kimi -p --print`（`--session` 续聊），Qoder 走 `qodercli --print`，Kilo 走 `kilo run --auto`。同一工位串行执行，完成后自动发布简报。
 - **主管分派**：`@主管 <工作>` 或网页分派表单 → 自动建任务 → 挑选成员（用户指定优先，否则优先空闲托管成员）→ @ 送达并跟踪。
 
 ## MCP 工具一览
@@ -158,6 +175,7 @@ Claude Code ── hooks ──┘        │  ▲                └── SSE 
 ## 安全边界
 
 - Hub 只监听 `127.0.0.1`，无鉴权；请勿改成对外监听。
+- WorkBuddy 经 SDK stdio MCP 标准代理（`apps/hub/src/mcp/stdio.ts`，桌面端随包分发）以 stdio 连接 Hub 的 HTTP `/mcp`；代理同样只访问本机 `127.0.0.1`，Hub 离线时工具调用以可读错误拒绝而非挂起 WorkBuddy。
 - Codex / Claude 托管工位默认只读沙箱；需要写文件时在创建工位时选择"可写工作区"。
 - `handoff_task` 自动创建的接班 Codex CLI 使用可写工作区，因为其职责是直接继续开发；工作目录优先继承 B，其次继承 A，也可在调用时显式指定。
 - 所有被修改的配置在安装/卸载时都会生成 `.bak-时间戳` 备份。
