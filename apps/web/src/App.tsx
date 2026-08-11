@@ -49,6 +49,41 @@ const TASK_STATUS_LABELS: Record<string, string> = {
   cancelled: "已取消",
 };
 
+/** 工位按部门分组；无部门的人归入「未入部门」 */
+function groupRosterByDepartment(
+  agents: AgentCard[],
+  groups: OfficeGroup[],
+): Array<{ id: string; name: string; agents: AgentCard[] }> {
+  const buckets = new Map<string, AgentCard[]>();
+  const unassigned: AgentCard[] = [];
+  for (const agent of agents) {
+    const deptId = agent.groupIds?.[0];
+    if (!deptId) {
+      unassigned.push(agent);
+      continue;
+    }
+    const list = buckets.get(deptId) ?? [];
+    list.push(agent);
+    buckets.set(deptId, list);
+  }
+  const sections: Array<{ id: string; name: string; agents: AgentCard[] }> = [];
+  for (const group of groups) {
+    const members = buckets.get(group.id);
+    if (members && members.length > 0) {
+      sections.push({ id: group.id, name: group.name, agents: members });
+      buckets.delete(group.id);
+    }
+  }
+  // 孤儿 groupId（部门已删）
+  for (const [id, members] of buckets) {
+    sections.push({ id, name: "未知部门", agents: members });
+  }
+  if (unassigned.length > 0) {
+    sections.push({ id: "_none", name: "未入部门", agents: unassigned });
+  }
+  return sections;
+}
+
 const SOURCE_LABELS: Record<string, string> = {
   mcp: "主动发布",
   "cursor-hook": "Cursor 回帧",
@@ -185,6 +220,58 @@ function BossNameControl({ boss, onChanged }: { boss: AgentCard | undefined; onC
         </button>
       )}
       {error && <span className="boss-error">{error}</span>}
+    </div>
+  );
+}
+
+type SystemChip = {
+  label: string;
+  ok: boolean;
+  detail: string;
+  target?: OnboardTabId;
+};
+
+function ClientHealthMenu({ chips, onOpenTab }: { chips: SystemChip[]; onOpenTab: (tab: OnboardTabId) => void }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+  const okCount = chips.filter((c) => c.ok).length;
+  return (
+    <div className="client-health" ref={rootRef}>
+      <button
+        className={`sys-dot ${okCount === chips.length ? "ok" : "bad"}`}
+        title={`客户端接入 ${okCount}/${chips.length}，点击查看明细`}
+        onClick={() => setOpen((v) => !v)}
+      >
+        客户端 {okCount}/{chips.length}
+      </button>
+      {open && (
+        <div className="client-health-menu" role="menu">
+          {chips.map((chip) => (
+            <button
+              key={chip.label}
+              className="client-health-item"
+              role="menuitem"
+              title={chip.detail}
+              onClick={() => {
+                if (!chip.target) return;
+                onOpenTab(chip.target);
+                setOpen(false);
+              }}
+            >
+              <span className={`sys-dot ${chip.ok ? "ok" : "bad"}`}>{chip.label}</span>
+              <span className="client-health-detail">{chip.detail}</span>
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -813,7 +900,7 @@ function NewAgentForm({ onDone, onOpenShell }: { onDone: () => void; onOpenShell
     try {
       if (terminalForm) {
         // 终端形态：在「本机终端」开一个交互式 CLI，会话经 hooks/notify 自动入驻办公室
-        const cli: "codex" | "claude" | "kimi" = kind === "kimi" ? "kimi" : (kind as "codex" | "claude");
+        const cli: "codex" | "claude" = kind === "claude" ? "claude" : "codex";
         await api.shellTermCreate({
           shell: "powershell",
           command: cli,
@@ -1447,9 +1534,14 @@ function BriefWall({
   onOpenTask: (taskId: string) => void;
 }) {
   const [filter, setFilter] = useState("");
+  const [taskOnly, setTaskOnly] = useState(false);
   const [expanded, setExpanded] = useState(false);
-  const matching = filter ? briefs.filter((b) => b.agentName === filter) : briefs;
-  const shown = expanded ? matching : matching.slice(0, 8);
+  const matching = briefs.filter((b) => {
+    if (filter && b.agentName !== filter) return false;
+    if (taskOnly && !b.taskId) return false;
+    return true;
+  });
+  const shown = expanded ? matching : matching.slice(0, 5);
   const authors = useMemo(
     () => [...new Set(briefs.map((b) => b.agentName))],
     [briefs],
@@ -1458,26 +1550,43 @@ function BriefWall({
     <section className="panel panel-briefs">
       <div className="panel-head">
         <h3>简报墙</h3>
-        <select
-          className="brief-filter"
-          value={filter}
-          onChange={(e) => {
-            setFilter(e.target.value);
-            setExpanded(false);
-          }}
-          aria-label="按成员筛选简报"
-        >
-          <option value="">全部成员（{briefs.length}）</option>
-          {authors.map((n) => (
-            <option key={n} value={n}>
-              {n}
-            </option>
-          ))}
-        </select>
+        <div className="brief-toolbar">
+          <select
+            className="brief-filter"
+            value={filter}
+            onChange={(e) => {
+              setFilter(e.target.value);
+              setExpanded(false);
+            }}
+            aria-label="按成员筛选简报"
+          >
+            <option value="">全部成员（{briefs.length}）</option>
+            {authors.map((n) => (
+              <option key={n} value={n}>
+                {n}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className={`ghost-btn sm ${taskOnly ? "active" : ""}`}
+            onClick={() => {
+              setTaskOnly((v) => !v);
+              setExpanded(false);
+            }}
+            title="只看关联了任务的简报"
+          >
+            {taskOnly ? "任务简报" : "全部简报"}
+          </button>
+        </div>
       </div>
       <div className="brief-wall">
         {shown.length === 0 && (
-          <p className="empty">还没有简报。成员完成工作后会自动出现在这里。</p>
+          <p className="empty">
+            {taskOnly
+              ? "还没有关联任务的简报。发布简报时带上 task_id，或到任务中心查看时间线。"
+              : "还没有简报。成员完成工作后会自动出现在这里。"}
+          </p>
         )}
         {shown.map((brief) => (
           <BriefCard
@@ -1487,9 +1596,9 @@ function BriefWall({
             onOpenTask={onOpenTask}
           />
         ))}
-        {matching.length > 8 && (
+        {matching.length > 5 && (
           <button className="brief-more" onClick={() => setExpanded((value) => !value)}>
-            {expanded ? "收起历史简报" : `查看其余 ${matching.length - 8} 条`}
+            {expanded ? "收起历史简报" : `查看其余 ${matching.length - 5} 条`}
           </button>
         )}
       </div>
@@ -1969,7 +2078,7 @@ function EmployeeCardModal({
         <dl className="emp-facts">
           {(agent.groupNames?.length ?? 0) > 0 && (
             <div>
-              <dt>项目组</dt>
+              <dt>部门</dt>
               <dd>{agent.groupNames!.map((g) => `# ${g}`).join("　")}</dd>
             </div>
           )}
@@ -3086,9 +3195,10 @@ export function App() {
   const [agentQuery, setAgentQuery] = useState("");
   const [showArchivedAgents, setShowArchivedAgents] = useState(false);
   const [syncError, setSyncError] = useState("");
+  const [collapsedDepts, setCollapsedDepts] = useState<Record<string, boolean>>({});
   const refreshTimer = useRef<number | null>(null);
 
-  // 当前频道对应的项目组被解散时回到大群
+  // 当前频道对应的部门被解散时回到大群
   useEffect(() => {
     if (channel !== "hall" && state && !(state.groups ?? []).some((g) => g.id === channel)) {
       setChannel("hall");
@@ -3130,6 +3240,25 @@ export function App() {
     };
   }, [refresh]);
 
+  const rosterSelection = useMemo(
+    () =>
+      state
+        ? selectWorkers({
+            agents: state.agents,
+            tasks: state.tasks,
+            query: agentQuery,
+            showArchived: showArchivedAgents,
+          })
+        : { visible: [] as AgentCard[], archivedCount: 0, totalCount: 0 },
+    [state, agentQuery, showArchivedAgents],
+  );
+  const rosterSections = useMemo(
+    () => groupRosterByDepartment(rosterSelection.visible, state?.groups ?? []),
+    [rosterSelection.visible, state?.groups],
+  );
+  const toggleDept = (id: string) =>
+    setCollapsedDepts((prev) => ({ ...prev, [id]: !prev[id] }));
+
   if (!state) {
     return (
       <div className="loading">
@@ -3150,19 +3279,8 @@ export function App() {
   const agents = state.agents.filter((a) => a.kind !== "user");
   const deskAgents = agents.filter((a) => a.kind !== "supervisor");
   const onlineCount = deskAgents.filter((a) => a.status !== "offline").length;
-  const rosterSelection = selectWorkers({
-    agents: state.agents,
-    tasks: state.tasks,
-    query: agentQuery,
-    showArchived: showArchivedAgents,
-  });
 
-  const systemChips: Array<{
-    label: string;
-    ok: boolean;
-    detail: string;
-    target?: OnboardTabId;
-  }> = [
+  const systemChips: SystemChip[] = [
     { label: "中枢", ok: Boolean(health), detail: health ? "在线" : "离线" },
     {
       label: "Cursor",
@@ -3328,20 +3446,9 @@ export function App() {
         </nav>
         <div className="topbar-right">
           <div className="health" aria-label="系统状态">
-            {systemChips.map((chip) =>
-              chip.target ? (
-                <button
-                  key={chip.label}
-                  className={`sys-dot ${chip.ok ? "ok" : "bad"}`}
-                  title={`${chip.label}：${chip.detail}`}
-                  onClick={() => {
-                    setOnboardTab(chip.target!);
-                    setOnboardOpen(true);
-                  }}
-                >
-                  {chip.label}
-                </button>
-              ) : (
+            {systemChips
+              .filter((chip) => !chip.target)
+              .map((chip) => (
                 <span
                   key={chip.label}
                   className={`sys-dot ${chip.ok ? "ok" : "bad"}`}
@@ -3349,8 +3456,14 @@ export function App() {
                 >
                   {chip.label}
                 </span>
-              ),
-            )}
+              ))}
+            <ClientHealthMenu
+              chips={systemChips.filter((chip) => Boolean(chip.target))}
+              onOpenTab={(tab) => {
+                setOnboardTab(tab);
+                setOnboardOpen(true);
+              }}
+            />
           </div>
           <BossNameControl boss={boss} onChanged={refresh} />
           <button className="primary-btn onboard-btn" onClick={() => {
@@ -3436,16 +3549,39 @@ export function App() {
                     没有匹配的当前工位，可清除搜索、查看历史或新建托管工位。
                   </p>
                 )}
-                {rosterSelection.visible.map((agent) => (
-                  <AgentBadge
-                    key={agent.id}
-                    agent={agent}
-                    groups={state.groups ?? []}
-                    roles={state.roles ?? []}
-                    onMention={(name) => setMentionPrefill(`@${name}`)}
-                    onChanged={refresh}
-                  />
-                ))}
+                {rosterSections.map((section) => {
+                  const collapsed = Boolean(collapsedDepts[section.id]);
+                  const onlineInDept = section.agents.filter((a) => a.status !== "offline").length;
+                  return (
+                    <div key={section.id} className="roster-dept">
+                      <button
+                        type="button"
+                        className="roster-dept-head"
+                        onClick={() => toggleDept(section.id)}
+                        aria-expanded={!collapsed}
+                      >
+                        <span className="roster-dept-toggle" aria-hidden>
+                          {collapsed ? "▸" : "▾"}
+                        </span>
+                        <strong>#{section.name}</strong>
+                        <em>
+                          {onlineInDept}/{section.agents.length}
+                        </em>
+                      </button>
+                      {!collapsed &&
+                        section.agents.map((agent) => (
+                          <AgentBadge
+                            key={agent.id}
+                            agent={agent}
+                            groups={state.groups ?? []}
+                            roles={state.roles ?? []}
+                            onMention={(name) => setMentionPrefill(`@${name}`)}
+                            onChanged={refresh}
+                          />
+                        ))}
+                    </div>
+                  );
+                })}
               </div>
               <NewAgentForm onDone={refresh} onOpenShell={() => setView("shell")} />
             </section>

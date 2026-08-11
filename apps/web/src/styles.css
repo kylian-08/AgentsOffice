@@ -283,13 +283,21 @@ button:focus-visible {
   display: flex;
   align-items: center;
   gap: 14px;
-  min-width: 200px;
+  min-width: 0;
+  flex: 0 1 auto;
   justify-content: flex-end;
 }
 
 .health {
   display: flex;
   gap: 10px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.health::-webkit-scrollbar {
+  display: none;
 }
 
 .sys-dot {
@@ -329,8 +337,62 @@ button.sys-dot:hover {
   background: var(--accent);
 }
 
+.client-health {
+  position: relative;
+  flex: none;
+}
+
+.client-health-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 60;
+  min-width: 220px;
+  max-height: min(60vh, 420px);
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm, 10px);
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.14);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.client-health-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: none;
+  background: none;
+  border-radius: 7px;
+  padding: 7px 9px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.client-health-item:hover {
+  background: #f1f4f8;
+}
+
+.client-health-item .sys-dot {
+  flex: none;
+}
+
+.client-health-detail {
+  font-size: 12px;
+  color: var(--muted);
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .onboard-btn {
   font-size: 13px;
+  white-space: nowrap;
 }
 
 /* ---------- 布局 ---------- */
@@ -1618,6 +1680,18 @@ button.sys-dot:hover {
   border-color: var(--indigo);
 }
 
+.brief-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.brief-toolbar .ghost-btn.active {
+  border-color: var(--indigo);
+  color: var(--indigo);
+}
+
 .brief-task-tag {
   display: inline-block;
   margin: 4px 0 6px;
@@ -1629,6 +1703,45 @@ button.sys-dot:hover {
   color: var(--indigo);
   cursor: pointer;
 }
+
+.roster-dept {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.roster-dept-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  background: transparent;
+  padding: 4px 2px 6px;
+  cursor: pointer;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+}
+
+.roster-dept-head strong {
+  font-size: 13px;
+}
+
+.roster-dept-head em {
+  margin-left: auto;
+  font-style: normal;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.roster-dept-toggle {
+  width: 1em;
+  color: var(--muted);
+}
+
 
 .dept-role-readonly {
   font-size: 12px;
@@ -2182,18 +2295,34 @@ button.sys-dot:hover {
   }
 
   .topbar {
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 8px 14px;
+    align-items: center;
   }
 
-  .brand,
-  .topbar-right {
+  .brand {
+    grid-column: 1;
+    grid-row: 1;
     min-width: 0;
+  }
+
+  .topbar-right {
+    grid-column: 2;
+    grid-row: 1;
+    min-width: 0;
+    justify-content: flex-end;
+  }
+
+  .view-tabs {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    width: 100%;
   }
 }
 
 @media (max-width: 760px) {
   .topbar {
-    display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 9px 10px;
     padding: 10px 12px;
@@ -2201,11 +2330,13 @@ button.sys-dot:hover {
 
   .brand {
     grid-column: 1 / -1;
+    grid-row: 1;
     min-width: 0;
   }
 
   .view-tabs {
     grid-column: 1 / -1;
+    grid-row: 3;
     width: 100%;
     border-radius: var(--radius-sm);
   }
@@ -2216,6 +2347,7 @@ button.sys-dot:hover {
 
   .topbar-right {
     grid-column: 1 / -1;
+    grid-row: 2;
     width: 100%;
     gap: 8px;
     justify-content: space-between;
@@ -2512,6 +2644,11 @@ button.sys-dot:hover {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex: none;
+}
+
+.boss-control .ghost-btn {
+  white-space: nowrap;
 }
 
 .boss-error {
