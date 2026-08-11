@@ -37,7 +37,14 @@ export type ManagedDispatcher = (
 
 export const USER_AGENT_NAME = "老板";
 
-const MANAGED_KINDS = new Set(["codex-managed", "cursor-managed", "claude-managed"]);
+const MANAGED_KINDS = new Set([
+  "codex-managed",
+  "cursor-managed",
+  "claude-managed",
+  "kimi-managed",
+  "qoder-managed",
+  "kilo-managed",
+]);
 
 /**
  * 办公室领域服务：统一消息路由、任务与简报入口。
@@ -760,11 +767,11 @@ export class OfficeService {
   // ---------- 终端工位（开终端即入驻，会话稍后收养） ----------
 
   /**
-   * 终端工位占位登记：开 codex/claude 终端那一刻就入驻花名册（状态 online），
+   * 终端工位占位登记：开 codex/claude/kimi 终端那一刻就入驻花名册（状态 online），
    * 等 CLI 的 notify / hooks 带着 threadId/sessionId 回来时收养绑定，避免重复员工。
    */
   registerTerminalAgent(input: {
-    cli: "codex" | "claude";
+    cli: "codex" | "claude" | "kimi";
     cwd: string;
     title?: string;
   }): AgentCard {
@@ -781,10 +788,11 @@ export class OfficeService {
       status: "online",
       meta: { awaitingSession: input.cli },
     });
+    const cliLabel = input.cli === "codex" ? "Codex" : input.cli === "claude" ? "Claude" : "Kimi";
     this.event({
       type: "join",
       agentId: agent.id,
-      text: `${input.cli === "codex" ? "Codex" : "Claude"} 终端工位开工（首轮对话后自动绑定会话）`,
+      text: `${cliLabel} 终端工位开工（首轮对话后自动绑定会话）`,
     });
     this.emit("agent", { agentId: agent.id });
     return agent;
@@ -792,7 +800,7 @@ export class OfficeService {
 
   /** notify/hook 会话回来时认领占位工位：优先目录一致的，其次最近开的 */
   adoptTerminalAgent(
-    cli: "codex" | "claude",
+    cli: "codex" | "claude" | "kimi",
     externalKey: string,
     cwd: string | null,
     meta: Record<string, unknown>,
@@ -818,10 +826,12 @@ export class OfficeService {
       status: "online",
       meta: { ...meta, awaitingSession: undefined },
     });
+    const cliLabel =
+      cli === "codex" ? "Codex 线程" : cli === "claude" ? "Claude 会话" : "Kimi 会话";
     this.event({
       type: "join",
       agentId: agent.id,
-      text: `终端工位绑定 ${cli === "codex" ? "Codex 线程" : "Claude 会话"}，可交接续聊`,
+      text: `终端工位绑定 ${cliLabel}，可交接续聊`,
     });
     this.emit("agent", { agentId: agent.id });
     return agent;

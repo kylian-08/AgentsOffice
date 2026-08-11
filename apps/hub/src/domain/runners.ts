@@ -332,31 +332,205 @@ export async function runCursorTurn(
 }
 
 /**
+ * 防御性解析非交互 CLI 的逐行输出：JSON 事件行取 text/result/content 字段，
+ * 其余非空行按纯文本收尾。用于 Kimi/Qoder/Kilo（输出格式未完全稳定）。
+ */
+function collectCliLine(line: string, acc: string[]): void {
+  const trimmed = line.trim();
+  if (!trimmed) return;
+  let event: any;
+  try {
+    event = JSON.parse(trimmed);
+  } catch {
+    acc.push(trimmed);
+    return;
+  }
+  if (typeof event !== "object" || event === null) return;
+  const candidate =
+    typeof event.text === "string"
+      ? event.text
+      : typeof event.result === "string"
+        ? event.result
+        : typeof event.content === "string"
+          ? event.content
+          : event?.message && typeof event.message === "string"
+            ? event.message
+            : "";
+  if (candidate.trim()) acc.push(candidate);
+}
+
+/** 通用非交互 CLI 托管：prompt 作为最后一个参数传入，防御性解析输出 */
+async function runNonInteractiveCli(opts: {
+  command: string;
+  label: string;
+  args: string[];
+  prompt: string;
+  config: OfficeConfig;
+  io?: TurnIO;
+  /** 从 JSON 事件行提取会话凭证（如 session id / thread id），落库供续聊 */
+  extractSession?: (event: any) => string | undefined;
+}): Promise<TurnResult> {
+  const io = opts.io ?? NOOP_IO;
+  const textLines: string[] = [];
+  let sessionId: string | undefined;
+  let usage: number | undefined;
+  const result = await runCli(opts.command, [...opts.args, opts.prompt], {
+    cwd: undefined,
+    timeoutMs: opts.config.codexTurnTimeoutMs,
+    registerKill: io.registerKill,
+    onLine: (line) => {
+      collectCliLine(line, textLines);
+      try {
+        const event = JSON.parse(line.trim());
+        if (typeof event === "object" && event !== null) {
+          const sid = opts.extractSession?.(event);
+          if (sid) {
+            sessionId = sid;
+            io.meta?.({ sessionId: sid });
+          }
+          const u = event?.usage ?? event?.turn?.usage;
+          if (u) {
+            usage =
+              (Number(u.input_tokens) ?? Number(u.inputTokens) ?? 0) +
+              (Number(u.output_tokens) ?? Number(u.outputTokens) ?? 0);
+          }
+          if (typeof event?.type === "string" && event.type !== "text" && typeof event?.text === "string") {
+            io.term(event.text, "info");
+          }
+        }
+      } catch {
+        /* 非 JSON 行已按文本收集 */
+      }
+    },
+  });
+  if (result.timedOut) {
+    throw new Error(`${opts.label} 运行超时（${Math.round(opts.config.codexTurnTimeoutMs / 60000)} 分钟）`);
+  }
+  const finalText = textLines.join("\n").trim();
+  if (result.code !== 0 && !finalText) {
+    throw new Error(
+      `${opts.command} 退出码 ${result.code}：${truncate(result.stderr || result.stdout, 400)}`,
+    );
+  }
+  return {
+    text: finalText || truncate(result.stdout, 2000) || "(无输出)",
+    meta: sessionId ? { sessionId } : undefined,
+    usage,
+  };
+}
+
+/** 托管 Kimi：kimi -p --print --output-format stream-json（--session 续聊） */
+export function runKimiTurn(
+  agent: AgentCard,
+  prompt: string,
+  config: OfficeConfig,
+  io: TurnIO = NOOP_IO,
+): Promise<TurnResult> {
+  const meta = agent.meta as { sessionId?: string };
+  const args = ["-p", "--print", "--output-format", "stream-json", "--yolo"];
+  if (meta.sessionId) args.push("--session", meta.sessionId);
+  return runNonInteractiveCli({
+    command: "kimi",
+    label: "Kimi",
+    args,
+    prompt,
+    config,
+    io,
+    extractSession: (event) => {
+      const sid = event?.session_id ?? event?.sessionId ?? event?.thread_id ?? event?.id;
+      return typeof sid === "string" && sid.length > 0 ? sid : undefined;
+    },
+  });
+}
+
+/** 托管 Qoder：qodercli --print（提示词作最后一个参数） */
+export function runQoderTurn(
+  agent: AgentCard,
+  prompt: string,
+  config: OfficeConfig,
+  io: TurnIO = NOOP_IO,
+): Promise<TurnResult> {
+  return runNonInteractiveCli({
+    command: "qodercli",
+    label: "Qoder",
+    args: ["--print"],
+    prompt,
+    config,
+    io,
+    extractSession: (event) => {
+      const sid = event?.session_id ?? event?.sessionId ?? event?.id;
+      return typeof sid === "string" && sid.length > 0 ? sid : undefined;
+    },
+  });
+}
+
+/** 托管 Kilo：kilo run（OpenCode fork 的非交互模式） */
+export function runKiloTurn(
+  agent: AgentCard,
+  prompt: string,
+  config: OfficeConfig,
+  io: TurnIO = NOOP_IO,
+): Promise<TurnResult> {
+  return runNonInteractiveCli({
+    command: "kilo",
+    label: "Kilo",
+    args: ["run", "--auto"],
+    prompt,
+    config,
+    io,
+    extractSession: (event) => {
+      const sid = event?.sessionID ?? event?.session_id ?? event?.sessionId ?? event?.id;
+      return typeof sid === "string" && sid.length > 0 ? sid : undefined;
+    },
+  });
+}
+
+/** 托管 runner 按 kind 前缀路由（可注入替身；直连输入也能命中） */
+export type ManagedRunnerKey =
+  | "codex-managed"
+  | "cursor-managed"
+  | "claude-managed"
+  | "kimi-managed"
+  | "qoder-managed"
+  | "kilo-managed";
+
+export function resolveRunnerForKind(
+  kind: string,
+  config: OfficeConfig,
+  runners?: Partial<Record<ManagedRunnerKey, TurnRunner>>,
+): TurnRunner {
+  if (kind.startsWith("codex")) {
+    return runners?.["codex-managed"] ?? ((a, p, io, imgs) => runCodexTurn(a, p, config, io, imgs));
+  }
+  if (kind.startsWith("claude")) {
+    return runners?.["claude-managed"] ?? ((a, p, io) => runClaudeTurn(a, p, config, io));
+  }
+  if (kind.startsWith("kimi")) {
+    return runners?.["kimi-managed"] ?? ((a, p, io) => runKimiTurn(a, p, config, io));
+  }
+  if (kind.startsWith("qoder")) {
+    return runners?.["qoder-managed"] ?? ((a, p, io) => runQoderTurn(a, p, config, io));
+  }
+  if (kind.startsWith("kilo")) {
+    return runners?.["kilo-managed"] ?? ((a, p, io) => runKiloTurn(a, p, config, io));
+  }
+  return runners?.["cursor-managed"] ?? ((a, p, io) => runCursorTurn(a, p, config, io));
+}
+
+/**
  * 组装托管调度器：@托管 Agent → 排队执行 → 回复入群 + 自动发布简报。
  * runner 可注入，测试时用假实现。
  */
 export function createManagedDispatcher(
   office: OfficeService,
   config: OfficeConfig,
-  runners?: Partial<
-    Record<"codex-managed" | "cursor-managed" | "claude-managed", TurnRunner>
-  >,
+  runners?: Partial<Record<ManagedRunnerKey, TurnRunner>>,
 ) {
   const queue = new RunQueue();
   const gate = new Semaphore(Math.max(1, config.maxConcurrentRuns ?? 3));
   const lastErrors = new Map<string, string>();
   // 直连输入也会打到 codex-cli / claude-cli（凭 threadId/sessionId 续聊），按前缀路由
-  const resolveRunner = (kind: string): TurnRunner => {
-    if (kind.startsWith("codex")) {
-      return (
-        runners?.["codex-managed"] ?? ((a, p, io, imgs) => runCodexTurn(a, p, config, io, imgs))
-      );
-    }
-    if (kind.startsWith("claude")) {
-      return runners?.["claude-managed"] ?? ((a, p, io) => runClaudeTurn(a, p, config, io));
-    }
-    return runners?.["cursor-managed"] ?? ((a, p, io) => runCursorTurn(a, p, config, io));
-  };
+  const resolveRunner = (kind: string): TurnRunner => resolveRunnerForKind(kind, config, runners);
 
   return (
     agent: AgentCard,

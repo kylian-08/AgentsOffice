@@ -31,9 +31,20 @@ export function createMcpServer(office: OfficeService): McpServer {
       inputSchema: {
         name: z.string().min(1).max(64).describe("你的工号/名字，例如 cursor-ab12cd"),
         kind: z
-          .enum(["cursor-ide", "codex-cli", "claude-cli"])
+          .enum([
+            "cursor-ide",
+            "codex-cli",
+            "claude-cli",
+            "zcode-cli",
+            "workbuddy-cli",
+            "opencode-cli",
+            "kimi-cli",
+            "qoder-cli",
+            "kilo-cli",
+            "trae-ide",
+          ])
           .describe(
-            "你的类型：Cursor IDE 会话填 cursor-ide，Codex 终端填 codex-cli，Claude Code 填 claude-cli",
+            "你的类型：Cursor IDE 会话填 cursor-ide，Codex 终端填 codex-cli，Claude Code 填 claude-cli，ZCode 填 zcode-cli，WorkBuddy 填 workbuddy-cli，OpenCode 填 opencode-cli，Kimi 填 kimi-cli，Qoder 填 qoder-cli，Kilo 填 kilo-cli，Trae 填 trae-ide",
           ),
         workspace: z.string().optional().describe("你当前的工作目录"),
         model: z

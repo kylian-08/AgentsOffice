@@ -5,6 +5,7 @@ import {
   buildHookCommands,
   resolveHookNode,
   resolveHooksSourceDir,
+  resolveStdioEntry,
 } from "../src/setup/install.js";
 
 describe("接入安装资源路径", () => {
@@ -14,8 +15,17 @@ describe("接入安装资源路径", () => {
     expect(resolveHooksSourceDir({ AGENT_OFFICE_HOOKS_DIR: bundled })).toBe(bundled);
   });
 
-  it("源码运行时仍能找到仓库 hooks 目录", () => {
-    expect(existsSync(resolve(resolveHooksSourceDir({}), "codex-notify.mjs"))).toBe(true);
+  it("源码运行时仍能找到仓库 hooks 目录（含新接入脚本）", () => {
+    const dir = resolveHooksSourceDir({});
+    for (const file of [
+      "codex-notify.mjs",
+      "zcode-hook.mjs",
+      "opencode-plugin.mjs",
+      "kimi-hook.mjs",
+      "qoder-hook.mjs",
+    ]) {
+      expect(existsSync(resolve(dir, file))).toBe(true);
+    }
   });
 
   it("Electron Hub 必须使用主进程发现的系统 Node", () => {
@@ -24,7 +34,12 @@ describe("接入安装资源路径", () => {
     expect(() => resolveHookNode({}, "AgentOffice.exe", true)).toThrow("系统 Node.js");
   });
 
-  it("三个 Hook 命令都携带稳定脚本路径和 Hub 地址", () => {
+  it("stdio 代理入口优先使用主进程注入的打包产物", () => {
+    const bundled = resolve("D:/AgentOffice/resources/stdio.js");
+    expect(resolveStdioEntry({ AGENT_OFFICE_STDIO_ENTRY: bundled })).toBe(bundled);
+  });
+
+  it("五个 Hook 命令都携带稳定脚本路径和 Hub 地址", () => {
     const node = resolve("C:/Program Files/nodejs/node.exe");
     const hooks = resolve("C:/Users/test/.agent-office/hooks");
     const baseUrl = "http://127.0.0.1:4519";
@@ -39,5 +54,18 @@ describe("接入安装资源路径", () => {
     ]);
     expect(commands.claude).toContain(resolve(hooks, "claude-hook.mjs"));
     expect(commands.claude).toContain(baseUrl);
+    expect(commands.zcode).toEqual({
+      command: node,
+      args: [resolve(hooks, "zcode-hook.mjs"), baseUrl],
+    });
+    expect(commands.workbuddyBridge).toEqual({
+      command: node,
+      args: [resolveStdioEntry({}), baseUrl],
+    });
+    expect(commands.kimi).toContain(resolve(hooks, "kimi-hook.mjs"));
+    expect(commands.kimi).toContain(baseUrl);
+    expect(commands.qoder).toContain(resolve(hooks, "qoder-hook.mjs"));
+    expect(commands.qoder).toContain(baseUrl);
   });
 });
+

@@ -66,6 +66,20 @@ if (npmInstall.status !== 0) {
 }
 console.log("[desktop] hub bundle 完成");
 
+// stdio MCP 代理：单独打成自包含 ESM（SDK 打进产物），供 WorkBuddy 等 stdio 客户端调用。
+// 主进程通过 AGENT_OFFICE_STDIO_ENTRY 把它注入安装命令。
+await build({
+  entryPoints: [join(HUB, "src/mcp/stdio.ts")],
+  bundle: true,
+  platform: "node",
+  format: "esm",
+  target: "node22",
+  outfile: join(OUT, "resources/stdio.js"),
+  external: [],
+  logLevel: "warning",
+});
+console.log("[desktop] stdio MCP 代理编译完成");
+
 // Electron 主进程：CJS
 await build({
   entryPoints: [join(DESKTOP, "src/main.ts")],

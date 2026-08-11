@@ -57,8 +57,8 @@ export class ShellTerminalManager {
     cols?: number;
     rows?: number;
     title?: string;
-    /** 直接在终端里启动的 Agent CLI（codex / claude），会话经 hooks/notify 自动入驻办公室 */
-    command?: "codex" | "claude";
+    /** 直接在终端里启动的 Agent CLI（codex / claude / kimi），会话经 hooks/notify 自动入驻办公室 */
+    command?: "codex" | "claude" | "kimi";
   }): Promise<{ ok: true; info: ShellTermInfo } | { ok: false; error: string }> {
     const aliveCount = [...this.sessions.values()].filter((s) => s.info.alive).length;
     if (aliveCount >= MAX_SESSIONS) {
@@ -78,7 +78,7 @@ export class ShellTerminalManager {
             : (process.env.SHELL ?? "bash");
     // Agent CLI 在 shell 里启动：CLI 退出后终端还在，能看到报错
     const args: string[] = [];
-    if (opts.command === "codex" || opts.command === "claude") {
+    if (opts.command === "codex" || opts.command === "claude" || opts.command === "kimi") {
       if (shell === "cmd.exe") args.push("/k", opts.command);
       else args.push("-NoLogo", "-NoExit", "-Command", opts.command);
     }

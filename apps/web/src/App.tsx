@@ -54,6 +54,10 @@ const SOURCE_LABELS: Record<string, string> = {
   "cursor-hook": "Cursor 回帧",
   "codex-notify": "Codex 回帧",
   "claude-hook": "Claude 回帧",
+  "zcode-hook": "ZCode 回帧",
+  "opencode-hook": "OpenCode 回帧",
+  "kimi-hook": "Kimi 回帧",
+  "qoder-hook": "Qoder 回帧",
   "codex-managed": "托管执行",
   "cursor-managed": "托管执行",
   "claude-managed": "托管执行",
@@ -258,7 +262,7 @@ function HistoryModal({ agent, onClose }: { agent: AgentCard; onClose: () => voi
         <div className="history-screen" role="log" aria-live="polite" ref={scrollRef} onScroll={onScroll}>
           {loaded && lines.length === 0 && (
             <p>
-              还没有对话记录。托管员工被 @ 后、或手工会话（Cursor/Codex/Claude）重启加载新 hooks 后，
+              还没有对话记录。托管员工被 @ 后、或手工会话（Cursor/Codex/Claude/ZCode）重启加载新 hooks 后，
               提问与回复会自动同步到这里。
             </p>
           )}
@@ -522,7 +526,17 @@ function AgentBadge({
   const promotable =
     (agent.kind === "codex-cli" && Boolean(m.threadId)) ||
     (agent.kind === "claude-cli" && Boolean(m.sessionId));
-  const inboxOnly = agent.kind === "cursor-ide" || agent.kind === "codex-cli" || agent.kind === "claude-cli";
+  const inboxOnly =
+    agent.kind === "cursor-ide" ||
+    agent.kind === "codex-cli" ||
+    agent.kind === "claude-cli" ||
+    agent.kind === "zcode-cli" ||
+    agent.kind === "workbuddy-cli" ||
+    agent.kind === "opencode-cli" ||
+    agent.kind === "kimi-cli" ||
+    agent.kind === "qoder-cli" ||
+    agent.kind === "kilo-cli" ||
+    agent.kind === "trae-ide";
   return (
     <div className={`badge status-${agent.status}`}>
       <div className="badge-top">
@@ -789,9 +803,10 @@ function NewAgentForm({ onDone, onOpenShell }: { onDone: () => void; onOpenShell
     try {
       if (terminalForm) {
         // 终端形态：在「本机终端」开一个交互式 CLI，会话经 hooks/notify 自动入驻办公室
+        const cli: "codex" | "claude" | "kimi" = kind === "kimi" ? "kimi" : (kind as "codex" | "claude");
         await api.shellTermCreate({
           shell: "powershell",
-          command: kind as "codex" | "claude",
+          command: cli,
           cwd: workspace.trim() || undefined,
           title: name.trim() || undefined,
         });
@@ -833,6 +848,9 @@ function NewAgentForm({ onDone, onOpenShell }: { onDone: () => void; onOpenShell
         <option value="codex">Codex</option>
         <option value="claude">Claude</option>
         <option value="cursor">Cursor（需 API Key）</option>
+        <option value="kimi">Kimi</option>
+        <option value="qoder">Qoder</option>
+        <option value="kilo">Kilo</option>
       </select>
       {kind !== "cursor" && (
         <select value={form} onChange={(e) => setForm(e.target.value as any)} title="工位形态">
@@ -907,6 +925,62 @@ const ONBOARD_TABS = [
       "本机有 Agent Office 协作中枢（MCP 服务 agent-office）。请调用 register_agent 登记，工号自拟（如 claude-架构），kind 填 claude-cli；每轮开始先 read_inbox，完成工作后 publish_brief；阶段任务需要同事接手时调用 handoff_task 自动交接并唤醒。",
     note: "新启动的 Claude Code 会话（任意目录）会自动登记。",
   },
+  {
+    id: "zcode",
+    label: "ZCode",
+    intro: "已有会话：把下面这句话发给那个 ZCode 会话：",
+    prompt:
+      "本机有 Agent Office 协作中枢（MCP 服务 agent-office）。请调用 register_agent 登记，工号自拟（如 zcode-主力），kind 填 zcode-cli；每轮开始先 read_inbox，完成工作后 publish_brief；阶段任务需要同事接手时调用 handoff_task 自动交接并唤醒。",
+    note: "新启动的 ZCode 会话会自动登记，并从 ~/.zcode/AGENTS.md 读到协作协议。",
+  },
+  {
+    id: "workbuddy",
+    label: "WorkBuddy",
+    intro: "打开 WorkBuddy，把下面这句话发给它（MCP 未加载时先在设置里接入 agent-office）：",
+    prompt:
+      "本机有 Agent Office 协作中枢（MCP 服务 agent-office）。请调用 register_agent 登记，工号自拟（如 workbuddy-主力），kind 填 workbuddy-cli；每轮开始先 read_inbox，完成工作后 publish_brief；阶段任务需要同事接手时调用 handoff_task 自动交接并唤醒。",
+    note: "WorkBuddy 无 hooks 机制，不会自动登记；新对话需先调用 register_agent。协作协议已通过 SKILL.md 注入。",
+  },
+  {
+    id: "opencode",
+    label: "OpenCode",
+    intro: "已有会话：把下面这句话发给那个 OpenCode 会话：",
+    prompt:
+      "本机有 Agent Office 协作中枢（MCP 服务 agent-office）。请调用 register_agent 登记，工号自拟（如 opencode-主力），kind 填 opencode-cli；每轮开始先 read_inbox，完成工作后 publish_brief；阶段任务需要同事接手时调用 handoff_task 自动交接并唤醒。",
+    note: "OpenCode 会话由本地插件自动登记并回帧简报；插件未生效时请手动 register_agent（kind=opencode-cli）。",
+  },
+  {
+    id: "kimi",
+    label: "Kimi",
+    intro: "已有会话：把下面这句话发给那个 Kimi CLI 会话：",
+    prompt:
+      "本机有 Agent Office 协作中枢（MCP 服务 agent-office）。请调用 register_agent 登记，工号自拟（如 kimi-主力），kind 填 kimi-cli；每轮开始先 read_inbox，完成工作后 publish_brief；阶段任务需要同事接手时调用 handoff_task 自动交接并唤醒。",
+    note: "新启动的 Kimi Code CLI 会话会自动登记，并从 ~/.kimi-code/SYSTEM.md 读到协作协议。",
+  },
+  {
+    id: "qoder",
+    label: "Qoder",
+    intro: "已有会话：把下面这句话发给那个 Qoder 会话：",
+    prompt:
+      "本机有 Agent Office 协作中枢（MCP 服务 agent-office）。请调用 register_agent 登记，工号自拟（如 qoder-主力），kind 填 qoder-cli；每轮开始先 read_inbox，完成工作后 publish_brief；阶段任务需要同事接手时调用 handoff_task 自动交接并唤醒。",
+    note: "新启动的 Qoder 会话会自动登记，并从 ~/.qoder/AGENTS.md 读到协作协议。",
+  },
+  {
+    id: "kilo",
+    label: "Kilo",
+    intro: "已有会话：把下面这句话发给那个 Kilo CLI 会话：",
+    prompt:
+      "本机有 Agent Office 协作中枢（MCP 服务 agent-office）。请调用 register_agent 登记，工号自拟（如 kilo-主力），kind 填 kilo-cli；每轮开始先 read_inbox，完成工作后 publish_brief；阶段任务需要同事接手时调用 handoff_task 自动交接并唤醒。",
+    note: "Kilo 需手动 register_agent（kind=kilo-cli）；协议块已写入 ~/.config/kilocode/AGENTS.md。",
+  },
+  {
+    id: "trae",
+    label: "Trae",
+    intro: "已有会话：把下面这句话发给那个 Trae 会话：",
+    prompt:
+      "本机有 Agent Office 协作中枢（MCP 服务 agent-office）。请调用 register_agent 登记，工号自拟（如 trae-主力），kind 填 trae-ide；每轮开始先 read_inbox，完成工作后 publish_brief；阶段任务需要同事接手时调用 handoff_task 自动交接并唤醒。",
+    note: "Trae 无 hooks 机制，不会自动登记；新会话需先调用 register_agent。",
+  },
 ] as const;
 
 type OnboardTabId = (typeof ONBOARD_TABS)[number]["id"];
@@ -918,6 +992,13 @@ const INTEGRATION_CHECK_LABELS: Record<
   cursor: { runtime: "Cursor", hook: "Hooks", instructions: "会话规则" },
   codex: { runtime: "Codex CLI", hook: "Notify", instructions: "协作协议" },
   claude: { runtime: "Claude CLI", hook: "Hooks", instructions: "会话规则" },
+  zcode: { runtime: "ZCode", hook: "Hooks", instructions: "协作协议" },
+  workbuddy: { runtime: "WorkBuddy", hook: "桥接", instructions: "SKILL 协议" },
+  opencode: { runtime: "OpenCode", hook: "插件", instructions: "协作协议" },
+  kimi: { runtime: "Kimi CLI", hook: "Hooks", instructions: "协作协议" },
+  qoder: { runtime: "Qoder", hook: "Hooks", instructions: "协作协议" },
+  kilo: { runtime: "Kilo CLI", hook: "—", instructions: "协作协议" },
+  trae: { runtime: "Trae", hook: "—", instructions: "会话规则" },
 };
 
 function OnboardModal({
@@ -2696,6 +2777,62 @@ export function App() {
         ? "接入完整"
         : health?.integrations?.claude.issues.join("、") || "状态未加载",
       target: "claude",
+    },
+    {
+      label: "ZCode",
+      ok: Boolean(health?.integrations?.zcode.ready),
+      detail: health?.integrations?.zcode.ready
+        ? "接入完整"
+        : health?.integrations?.zcode.issues.join("、") || "状态未加载",
+      target: "zcode",
+    },
+    {
+      label: "WorkBuddy",
+      ok: Boolean(health?.integrations?.workbuddy.ready),
+      detail: health?.integrations?.workbuddy.ready
+        ? "接入完整"
+        : health?.integrations?.workbuddy.issues.join("、") || "状态未加载",
+      target: "workbuddy",
+    },
+    {
+      label: "OpenCode",
+      ok: Boolean(health?.integrations?.opencode.ready),
+      detail: health?.integrations?.opencode.ready
+        ? "接入完整"
+        : health?.integrations?.opencode.issues.join("、") || "状态未加载",
+      target: "opencode",
+    },
+    {
+      label: "Kimi",
+      ok: Boolean(health?.integrations?.kimi.ready),
+      detail: health?.integrations?.kimi.ready
+        ? "接入完整"
+        : health?.integrations?.kimi.issues.join("、") || "状态未加载",
+      target: "kimi",
+    },
+    {
+      label: "Qoder",
+      ok: Boolean(health?.integrations?.qoder.ready),
+      detail: health?.integrations?.qoder.ready
+        ? "接入完整"
+        : health?.integrations?.qoder.issues.join("、") || "状态未加载",
+      target: "qoder",
+    },
+    {
+      label: "Kilo",
+      ok: Boolean(health?.integrations?.kilo.ready),
+      detail: health?.integrations?.kilo.ready
+        ? "接入完整"
+        : health?.integrations?.kilo.issues.join("、") || "状态未加载",
+      target: "kilo",
+    },
+    {
+      label: "Trae",
+      ok: Boolean(health?.integrations?.trae.ready),
+      detail: health?.integrations?.trae.ready
+        ? "接入完整"
+        : health?.integrations?.trae.issues.join("、") || "状态未加载",
+      target: "trae",
     },
   ];
 

@@ -145,7 +145,7 @@ export const api = {
     }).then((r) => json<OfficeTask>(r)),
   createManagedAgent: (input: {
     name: string;
-    kind: "codex" | "cursor" | "claude";
+    kind: "codex" | "cursor" | "claude" | "kimi" | "qoder" | "kilo";
     workspace: string;
     sandbox: "read-only" | "workspace-write";
     model?: string;
@@ -267,7 +267,7 @@ export const api = {
     shell?: string;
     cwd?: string;
     title?: string;
-    command?: "codex" | "claude";
+    command?: "codex" | "claude" | "kimi";
   }) =>
     fetch("/api/shellterms", {
       method: "POST",

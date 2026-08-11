@@ -6,6 +6,7 @@ import {
   handleClaudeHook,
   handleCodexNotify,
   handleCursorHook,
+  handleZcodeHook,
 } from "../src/integrations/ingest.js";
 
 function makeOffice() {
@@ -80,6 +81,41 @@ describe("托管孪生去重", () => {
     });
     expect(out).toEqual({});
     expect(office.store.listAgents().filter((a) => a.kind === "cursor-ide")).toHaveLength(0);
+  });
+});
+
+describe("ZCode hooks 摄入", () => {
+  it("SessionStart 登记 zcode-xxxxxx 并注入协作约定", () => {
+    const office = makeOffice();
+    const out = handleZcodeHook(office, {
+      hook_event_name: "SessionStart",
+      session_id: "z-abc",
+      cwd: "D:\\proj",
+    });
+
+    const agents = office.store.listAgents().filter((a) => a.kind === "zcode-cli");
+    expect(agents).toHaveLength(1);
+    expect(agents[0].name).toMatch(/^zcode-/);
+    expect(out.additionalContext).toContain(`你的工号是「${agents[0].name}」`);
+  });
+
+  it("Stop 用 transcript 兜底简报，SessionEnd 下线", () => {
+    const office = makeOffice();
+    handleZcodeHook(office, { hook_event_name: "SessionStart", session_id: "z-b" });
+    const stopOut = handleZcodeHook(
+      office,
+      { hook_event_name: "Stop", session_id: "z-b", transcript_path: "t.jsonl" },
+      () => "我把接口接完了。",
+    );
+
+    expect(stopOut).toEqual({});
+    const briefs = office.store.listBriefs();
+    expect(briefs).toHaveLength(1);
+    expect(briefs[0].source).toBe("zcode-hook");
+    expect(briefs[0].result).toContain("接口接完");
+
+    handleZcodeHook(office, { hook_event_name: "SessionEnd", session_id: "z-b" });
+    expect(office.store.listAgents().find((a) => a.kind === "zcode-cli")!.status).toBe("offline");
   });
 });
 

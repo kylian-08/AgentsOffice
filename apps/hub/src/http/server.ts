@@ -15,6 +15,10 @@ import {
   handleClaudeHook,
   handleCodexNotify,
   handleCursorHook,
+  handleKimiHook,
+  handleOpenCodeHook,
+  handleQoderHook,
+  handleZcodeHook,
 } from "../integrations/ingest.js";
 import { createMcpServer } from "../mcp/tools.js";
 import { ShellTerminalManager } from "../domain/shellterm.js";
@@ -70,6 +74,18 @@ export async function createServer(
   app.post("/ingest/claude-hook", async (request) => {
     return handleClaudeHook(office, (request.body ?? {}) as Record<string, any>);
   });
+  app.post("/ingest/zcode-hook", async (request) => {
+    return handleZcodeHook(office, (request.body ?? {}) as Record<string, any>);
+  });
+  app.post("/ingest/opencode-hook", async (request) => {
+    return handleOpenCodeHook(office, (request.body ?? {}) as Record<string, any>);
+  });
+  app.post("/ingest/kimi-hook", async (request) => {
+    return handleKimiHook(office, (request.body ?? {}) as Record<string, any>);
+  });
+  app.post("/ingest/qoder-hook", async (request) => {
+    return handleQoderHook(office, (request.body ?? {}) as Record<string, any>);
+  });
 
   // ---------- REST API ----------
   const health = () =>
@@ -83,8 +99,9 @@ export async function createServer(
 
   app.post("/api/integrations/repair", async (request, reply) => {
     const client = (request.body as { client?: unknown } | undefined)?.client;
-    if (client !== "cursor" && client !== "codex" && client !== "claude") {
-      return reply.code(400).send({ error: "client 必须是 cursor、codex 或 claude" });
+    const allowed = ["cursor", "codex", "claude", "zcode", "workbuddy", "opencode", "kimi", "qoder", "kilo", "trae"] as const;
+    if (typeof client !== "string" || !(allowed as readonly string[]).includes(client)) {
+      return reply.code(400).send({ error: `client 必须是 ${allowed.join("、")}` });
     }
     repairIntegration(client as IntegrationClient);
     return health();
@@ -164,13 +181,13 @@ export async function createServer(
       cols?: number;
       rows?: number;
       title?: string;
-      command?: "codex" | "claude";
+      command?: "codex" | "claude" | "kimi";
     };
     if (body.cwd && !existsSync(body.cwd.trim())) {
       return reply.code(400).send({ error: `启动目录不存在：${body.cwd.trim()}` });
     }
-    if (body.command && body.command !== "codex" && body.command !== "claude") {
-      return reply.code(400).send({ error: "command 只支持 codex / claude" });
+    if (body.command && body.command !== "codex" && body.command !== "claude" && body.command !== "kimi") {
+      return reply.code(400).send({ error: "command 只支持 codex / claude / kimi" });
     }
     const result = await shellTerms.create(body);
     if (!result.ok) return reply.code(500).send({ error: result.error });
@@ -389,7 +406,7 @@ export async function createServer(
   app.post("/api/agents/managed", async (request, reply) => {
     const body = (request.body ?? {}) as {
       name?: string;
-      kind?: "codex" | "cursor" | "claude";
+      kind?: "codex" | "cursor" | "claude" | "kimi" | "qoder" | "kilo";
       workspace?: string;
       sandbox?: "read-only" | "workspace-write";
       model?: string;
@@ -402,9 +419,16 @@ export async function createServer(
       codex: "codex-managed",
       cursor: "cursor-managed",
       claude: "claude-managed",
+      kimi: "kimi-managed",
+      qoder: "qoder-managed",
+      kilo: "kilo-managed",
     } as const;
     const kind = body.kind ? kindMap[body.kind] : undefined;
-    if (!kind) return reply.code(400).send({ error: "kind 必须是 codex、cursor 或 claude" });
+    if (!kind) {
+      return reply
+        .code(400)
+        .send({ error: "kind 必须是 codex、cursor、claude、kimi、qoder 或 kilo" });
+    }
     if (office.store.getAgentByName(body.name.trim())) {
       return reply.code(409).send({ error: "该工号已存在" });
     }

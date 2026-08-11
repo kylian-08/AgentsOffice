@@ -174,6 +174,38 @@ describe("职位与岗位档案交接", () => {
     expect(prompts[0]).toContain("role_note_write");
   });
 
+  it("kimi/qoder/kilo 托管派发走各自 runner", async () => {
+    const office = makeOffice();
+    const ran: string[] = [];
+    office.setManagedDispatcher(
+      createManagedDispatcher(office, testConfig, {
+        "kimi-managed": vi.fn(async (a: AgentCard) => {
+          ran.push(`kimi:${a.name}`);
+          return { text: "kimi 收到" };
+        }),
+        "qoder-managed": vi.fn(async (a: AgentCard) => {
+          ran.push(`qoder:${a.name}`);
+          return { text: "qoder 收到" };
+        }),
+        "kilo-managed": vi.fn(async (a: AgentCard) => {
+          ran.push(`kilo:${a.name}`);
+          return { text: "kilo 收到" };
+        }),
+      }),
+    );
+    office.store.registerAgent({ name: "kimi-1", kind: "kimi-managed" });
+    office.store.registerAgent({ name: "qoder-1", kind: "qoder-managed" });
+    office.store.registerAgent({ name: "kilo-1", kind: "kilo-managed" });
+
+    office.sendMessage({ fromName: "老板", text: "@kimi-1 干活" });
+    office.sendMessage({ fromName: "老板", text: "@qoder-1 干活" });
+    office.sendMessage({ fromName: "老板", text: "@kilo-1 干活" });
+    await vi.waitFor(() => expect(ran.length).toBe(3));
+    expect(ran).toEqual(
+      expect.arrayContaining(["kimi:kimi-1", "qoder:qoder-1", "kilo:kilo-1"]),
+    );
+  });
+
   it("buildManagedPrompt 无职位时不出现档案段落", () => {
     const prompt = buildManagedPrompt({ agentName: "a", senderName: "老板", text: "干活" });
     expect(prompt).not.toContain("职位档案");

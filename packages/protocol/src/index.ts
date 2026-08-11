@@ -5,9 +5,19 @@ export type AgentKind =
   | "cursor-ide"
   | "codex-cli"
   | "claude-cli"
+  | "zcode-cli"
+  | "workbuddy-cli"
+  | "opencode-cli"
+  | "kimi-cli"
+  | "qoder-cli"
+  | "kilo-cli"
+  | "trae-ide"
   | "cursor-managed"
   | "codex-managed"
   | "claude-managed"
+  | "kimi-managed"
+  | "qoder-managed"
+  | "kilo-managed"
   | "supervisor"
   | "user";
 
@@ -169,7 +179,17 @@ export interface ClientIntegrationHealth {
   issues: string[];
 }
 
-export type IntegrationClient = "cursor" | "codex" | "claude";
+export type IntegrationClient =
+  | "cursor"
+  | "codex"
+  | "claude"
+  | "zcode"
+  | "workbuddy"
+  | "opencode"
+  | "kimi"
+  | "qoder"
+  | "kilo"
+  | "trae";
 
 export interface OfficeHealth {
   ok: boolean;
@@ -177,6 +197,7 @@ export interface OfficeHealth {
   dataDir: string;
   codexCli: boolean;
   claudeCli: boolean;
+  opencodeCli: boolean;
   cursorKey: boolean;
   integrations: Record<IntegrationClient, ClientIntegrationHealth>;
 }
@@ -197,9 +218,19 @@ export const AGENT_KIND_LABELS: Record<AgentKind, string> = {
   "cursor-ide": "Cursor 会话",
   "codex-cli": "Codex 会话",
   "claude-cli": "Claude 会话",
+  "zcode-cli": "ZCode 会话",
+  "workbuddy-cli": "WorkBuddy 会话",
+  "opencode-cli": "OpenCode 会话",
+  "kimi-cli": "Kimi 会话",
+  "qoder-cli": "Qoder 会话",
+  "kilo-cli": "Kilo 会话",
+  "trae-ide": "Trae 会话",
   "cursor-managed": "Cursor 托管",
   "codex-managed": "Codex 托管",
   "claude-managed": "Claude 托管",
+  "kimi-managed": "Kimi 托管",
+  "qoder-managed": "Qoder 托管",
+  "kilo-managed": "Kilo 托管",
   supervisor: "办公室主管",
   user: "人类成员",
 };

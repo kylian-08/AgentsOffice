@@ -77,6 +77,7 @@ function startHub(port: number): void {
         AGENT_OFFICE_WEB_DIST: join(res, "web"),
         AGENT_OFFICE_HOOKS_DIR: join(res, "hooks"),
         AGENT_OFFICE_HOOK_NODE: findSystemNode() ?? "",
+        AGENT_OFFICE_STDIO_ENTRY: join(res, "stdio.js"),
       },
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
