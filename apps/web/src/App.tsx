@@ -440,7 +440,6 @@ function AgentBadge({
   const [name, setName] = useState(agent.name);
   const [model, setModel] = useState(meta(agent).model ?? "");
   const [roleId, setRoleId] = useState(meta(agent).roleId ?? "");
-  const [groupIds, setGroupIds] = useState<string[]>(agent.groupIds ?? []);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -448,11 +447,16 @@ function AgentBadge({
   const [newRoleOpen, setNewRoleOpen] = useState(false);
   const [newRoleName, setNewRoleName] = useState("");
   const [newRoleDesc, setNewRoleDesc] = useState("");
+  const [newRoleGroupId, setNewRoleGroupId] = useState(groups[0]?.id ?? "");
 
   const createRoleInline = async () => {
     if (!newRoleName.trim()) return;
     try {
-      const role = await api.createRole(newRoleName.trim(), newRoleDesc.trim() || undefined);
+      const role = await api.createRole(
+        newRoleName.trim(),
+        newRoleDesc.trim() || undefined,
+        newRoleGroupId || undefined,
+      );
       setRoleId(role.id);
       setNewRoleOpen(false);
       setNewRoleName("");
@@ -469,7 +473,6 @@ function AgentBadge({
         name: name.trim(),
         model,
         ...(agent.kind !== "user" ? { roleId: roleId || null } : {}),
-        ...(agent.kind !== "user" && agent.kind !== "supervisor" ? { groupIds } : {}),
       });
       setEditing(false);
       setError("");
@@ -582,7 +585,8 @@ function AgentBadge({
 
       {!editing && m.title && (
         <div className="badge-title">
-          职位：{m.title}
+          {agent.groupNames?.[0] ? `${agent.groupNames[0]} · ` : ""}
+          {m.title}
           {m.roleId && (
             <button
               className="icon-btn dossier-btn"
@@ -595,10 +599,10 @@ function AgentBadge({
           )}
         </div>
       )}
-      {!editing && (agent.groupNames?.length ?? 0) > 0 && (
+      {!editing && !m.title && (agent.groupNames?.length ?? 0) > 0 && (
         <div className="badge-groups">
           {agent.groupNames!.map((gn) => (
-            <span key={gn} className="badge-group" title={`项目组：${gn}`}>
+            <span key={gn} className="badge-group" title={`部门：${gn}`}>
               # {gn}
             </span>
           ))}
@@ -648,6 +652,19 @@ function AgentBadge({
                 onChange={(e) => setNewRoleDesc(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && void createRoleInline()}
               />
+              {groups.length > 0 && (
+                <select
+                  value={newRoleGroupId}
+                  onChange={(e) => setNewRoleGroupId(e.target.value)}
+                  aria-label="职位所属部门"
+                >
+                  {groups.map((g) => (
+                    <option key={g.id} value={g.id}>
+                      {g.name}
+                    </option>
+                  ))}
+                </select>
+              )}
               <button
                 className="primary-btn sm"
                 disabled={!newRoleName.trim()}
@@ -657,23 +674,16 @@ function AgentBadge({
               </button>
             </div>
           )}
-          {agent.kind !== "user" && agent.kind !== "supervisor" && groups.length > 0 && (
+          {agent.kind !== "user" && agent.kind !== "supervisor" && (
             <div className="group-picker">
-              <span className="group-picker-label">项目组（可多选）</span>
-              {groups.map((g) => (
-                <label key={g.id} className="group-check">
-                  <input
-                    type="checkbox"
-                    checked={groupIds.includes(g.id)}
-                    onChange={(e) =>
-                      setGroupIds((prev) =>
-                        e.target.checked ? [...prev, g.id] : prev.filter((x) => x !== g.id),
-                      )
-                    }
-                  />
-                  {g.name}
-                </label>
-              ))}
+              <span className="group-picker-label">归属（随职位）</span>
+              <span className="dept-role-readonly">
+                {(agent.groupNames?.[0] ?? "未入部门") +
+                  " · " +
+                  (roles.find((r) => r.id === (roleId || meta(agent).roleId))?.name ??
+                    meta(agent).title ??
+                    "未任职")}
+              </span>
             </div>
           )}
           {error && <div className="form-error">{error}</div>}
@@ -723,7 +733,7 @@ function AgentBadge({
               setName(agent.name);
               setModel(m.model ?? "");
               setRoleId(m.roleId ?? "");
-              setGroupIds(agent.groupIds ?? []);
+              setNewRoleGroupId(agent.groupIds?.[0] ?? groups[0]?.id ?? "");
             }}
           >
             ✎
@@ -765,7 +775,7 @@ function AgentBadge({
       {historyOpen && <HistoryModal agent={agent} onClose={() => setHistoryOpen(false)} />}
       {dossierOpen && m.roleId && (
         <RoleDossierModal
-          role={roles.find((r) => r.id === m.roleId) ?? { id: m.roleId, name: m.title ?? "职位", description: null, createdAt: 0 }}
+          role={roles.find((r) => r.id === m.roleId) ?? { id: m.roleId, name: m.title ?? "职位", description: null, groupId: null, createdAt: 0 }}
           onClose={() => setDossierOpen(false)}
           onChanged={onChanged}
         />
@@ -1362,9 +1372,18 @@ function Composer({
 
 // ---------- 简报卡片 ----------
 
-function BriefCard({ brief }: { brief: OfficeBrief }) {
+function BriefCard({
+  brief,
+  tasks,
+  onOpenTask,
+}: {
+  brief: OfficeBrief;
+  tasks?: OfficeTask[];
+  onOpenTask?: (taskId: string) => void;
+}) {
   const [expanded, setExpanded] = useState(false);
   const long = brief.result.length > 200;
+  const task = brief.taskId ? tasks?.find((t) => t.id === brief.taskId) : undefined;
   const fields: Array<[string, string | null]> = [
     ["进展", brief.progress],
     ["决策", brief.decisions],
@@ -1382,6 +1401,16 @@ function BriefCard({ brief }: { brief: OfficeBrief }) {
         <span className="brief-source">{SOURCE_LABELS[brief.source] ?? brief.source}</span>
         <time>{timeAgo(brief.createdAt)}</time>
       </header>
+      {brief.taskId && (
+        <button
+          type="button"
+          className="brief-task-tag"
+          onClick={() => onOpenTask?.(brief.taskId!)}
+          title={task?.title ?? brief.taskId}
+        >
+          任务 · {task?.title ?? brief.taskId.slice(0, 8)}
+        </button>
+      )}
       <h4>{brief.title}</h4>
       <p className="brief-result">
         {long && !expanded ? `${brief.result.slice(0, 200)}…` : brief.result}
@@ -1408,7 +1437,15 @@ function BriefCard({ brief }: { brief: OfficeBrief }) {
   );
 }
 
-function BriefWall({ briefs }: { briefs: OfficeBrief[] }) {
+function BriefWall({
+  briefs,
+  tasks,
+  onOpenTask,
+}: {
+  briefs: OfficeBrief[];
+  tasks: OfficeTask[];
+  onOpenTask: (taskId: string) => void;
+}) {
   const [filter, setFilter] = useState("");
   const [expanded, setExpanded] = useState(false);
   const matching = filter ? briefs.filter((b) => b.agentName === filter) : briefs;
@@ -1443,7 +1480,12 @@ function BriefWall({ briefs }: { briefs: OfficeBrief[] }) {
           <p className="empty">还没有简报。成员完成工作后会自动出现在这里。</p>
         )}
         {shown.map((brief) => (
-          <BriefCard key={brief.id} brief={brief} />
+          <BriefCard
+            key={brief.id}
+            brief={brief}
+            tasks={tasks}
+            onOpenTask={onOpenTask}
+          />
         ))}
         {matching.length > 8 && (
           <button className="brief-more" onClick={() => setExpanded((value) => !value)}>
@@ -1559,107 +1601,290 @@ function DispatchForm({
   );
 }
 
-// ---------- 任务面板 ----------
+// ---------- 任务面板（首页摘要） ----------
 
 function TaskPanel({
   tasks,
+  onOpenTasks,
+  onOpenTask,
+}: {
+  tasks: OfficeTask[];
+  onOpenTasks: () => void;
+  onOpenTask: (taskId: string) => void;
+}) {
+  const claimable = tasks.filter((t) => t.status === "open" && !t.assigneeAgentId);
+  const active = tasks.filter(
+    (t) => t.status === "claimed" || t.status === "in_progress",
+  );
+  return (
+    <section className="panel panel-tasks">
+      <div className="panel-head">
+        <h3>任务摘要</h3>
+        <button className="dispatch-btn" onClick={onOpenTasks}>
+          打开任务中心
+        </button>
+      </div>
+      <div className="task-summary-stats">
+        <span>待认领 {claimable.length}</span>
+        <span>进行中 {active.length}</span>
+      </div>
+      <ul className="task-list">
+        {active.slice(0, 5).map((task) => (
+          <li key={task.id} className={"task task-" + task.status}>
+            <button type="button" className="task-link" onClick={() => onOpenTask(task.id)}>
+              <span className="task-title">{task.title}</span>
+              <span className={"task-status s-" + task.status}>
+                {TASK_STATUS_LABELS[task.status]}
+              </span>
+            </button>
+            <div className="task-meta">
+              <span>{task.assigneeName ?? "未分派"}</span>
+            </div>
+          </li>
+        ))}
+        {active.length === 0 && (
+          <p className="empty">暂无进行中任务。去任务中心新建或分派。</p>
+        )}
+      </ul>
+    </section>
+  );
+}
+
+// ---------- 任务中心页 ----------
+
+function TasksBoard({
+  tasks,
   agents,
+  briefs,
+  focusTaskId,
   onChanged,
+  onFocusConsumed,
 }: {
   tasks: OfficeTask[];
   agents: AgentCard[];
+  briefs: OfficeBrief[];
+  focusTaskId?: string | null;
   onChanged: () => void;
+  onFocusConsumed?: () => void;
 }) {
-  const [dispatchOpen, setDispatchOpen] = useState(false);
+  const [selectedId, setSelectedId] = useState<string | null>(focusTaskId ?? null);
+  const [timeline, setTimeline] = useState<Awaited<ReturnType<typeof api.taskTimeline>> | null>(
+    null,
+  );
+  const [creating, setCreating] = useState(false);
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [assignee, setAssignee] = useState("");
   const [error, setError] = useState("");
   const assignable = sortWorkersForAction(
     agents.filter((a) => a.kind !== "user" && a.kind !== "supervisor"),
     tasks,
   );
-  const active = tasks.filter((t) => t.status !== "done" && t.status !== "cancelled");
+
+  useEffect(() => {
+    if (focusTaskId) {
+      setSelectedId(focusTaskId);
+      onFocusConsumed?.();
+    }
+  }, [focusTaskId, onFocusConsumed]);
+
+  useEffect(() => {
+    if (!selectedId) {
+      setTimeline(null);
+      return;
+    }
+    api
+      .taskTimeline(selectedId)
+      .then(setTimeline)
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+  }, [selectedId, tasks, briefs]);
+
+  const claimable = tasks.filter((t) => t.status === "open");
+  const active = tasks.filter((t) => t.status === "claimed" || t.status === "in_progress");
   const closed = tasks.filter((t) => t.status === "done" || t.status === "cancelled");
+
+  const create = async () => {
+    if (!title.trim()) return;
+    try {
+      const task = await api.createTask(title.trim(), description.trim(), assignee || null);
+      setTitle("");
+      setDescription("");
+      setAssignee("");
+      setCreating(false);
+      setError("");
+      onChanged();
+      setSelectedId(task.id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
 
   const update = async (taskId: string, patch: { status?: string; assignee?: string | null }) => {
     try {
       await api.updateTask(taskId, patch);
       setError("");
       onChanged();
-    } catch (updateError) {
-      setError(updateError instanceof Error ? updateError.message : String(updateError));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     }
   };
 
-  const renderTask = (task: OfficeTask) => {
-    const assignee = agents.find((agent) => agent.id === task.assigneeAgentId);
-    const blocked =
-      task.status !== "done" && task.status !== "cancelled" && assignee?.status === "offline";
-    return (
-    <li key={task.id} className={`task task-${task.status} ${blocked ? "task-blocked" : ""}`}>
-      <div className="task-main">
-        <span className="task-title">{task.title}</span>
-        <span className={`task-status s-${task.status}`}>
-          {TASK_STATUS_LABELS[task.status]}
-        </span>
-      </div>
-      <div className="task-meta">
-        <select
-          aria-label={`设置任务“${task.title}”的负责人`}
-          value={task.assigneeName ?? ""}
-          onChange={(e) => void update(task.id, { assignee: e.target.value || null })}
-        >
-          <option value="">未分派</option>
-          {assignable.map((a) => (
-            <option key={a.id} value={a.name}>
-              {a.name}{a.status === "offline" ? " · 离线" : ""}
-            </option>
-          ))}
-        </select>
-        <select
-          aria-label={`设置任务“${task.title}”的状态`}
-          value={task.status}
-          onChange={(e) => void update(task.id, { status: e.target.value })}
-        >
-          {Object.entries(TASK_STATUS_LABELS).map(([value, label]) => (
-            <option key={value} value={value}>
-              {label}
-            </option>
-          ))}
-        </select>
-      </div>
-      {blocked && <div className="task-warning">负责人离线，任务正在等待其下次上线</div>}
-    </li>
-    );
-  };
+  const renderColumn = (label: string, list: OfficeTask[]) => (
+    <div className="tasks-col">
+      <h3>
+        {label}
+        <small>{list.length}</small>
+      </h3>
+      <ul className="task-list">
+        {list.map((task) => (
+          <li
+            key={task.id}
+            className={
+              "task task-" + task.status + (selectedId === task.id ? " selected" : "")
+            }
+          >
+            <button type="button" className="task-link" onClick={() => setSelectedId(task.id)}>
+              <span className="task-title">{task.title}</span>
+              <span className={"task-status s-" + task.status}>
+                {TASK_STATUS_LABELS[task.status]}
+              </span>
+            </button>
+            <div className="task-meta">
+              <select
+                aria-label={"设置任务“" + task.title + "”的负责人"}
+                value={task.assigneeName ?? ""}
+                onChange={(e) => void update(task.id, { assignee: e.target.value || null })}
+              >
+                <option value="">未分派</option>
+                {assignable.map((a) => (
+                  <option key={a.id} value={a.name}>
+                    {a.name}
+                  </option>
+                ))}
+              </select>
+              <select
+                aria-label={"设置任务“" + task.title + "”的状态"}
+                value={task.status}
+                onChange={(e) => void update(task.id, { status: e.target.value })}
+              >
+                {Object.entries(TASK_STATUS_LABELS).map(([value, text]) => (
+                  <option key={value} value={value}>
+                    {text}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </li>
+        ))}
+        {list.length === 0 && <p className="empty">空</p>}
+      </ul>
+    </div>
+  );
 
   return (
-    <section className="panel panel-tasks">
-      <div className="panel-head">
-        <h3>任务看板</h3>
-        {!dispatchOpen && (
-          <button className="dispatch-btn" onClick={() => setDispatchOpen(true)}>
-            <span className="supervisor-mark" aria-hidden>
-              主管
-            </span>
-            分派工作
+    <div className="tasks-page">
+      <header className="tasks-toolbar">
+        <div>
+          <h2>任务中心</h2>
+          <p>待认领池、进行中与按任务聚合的执行时间线</p>
+        </div>
+        {!creating ? (
+          <button className="primary-btn" onClick={() => setCreating(true)}>
+            ＋ 新任务
           </button>
+        ) : (
+          <div className="tasks-create">
+            <input
+              placeholder="任务标题"
+              value={title}
+              autoFocus
+              onChange={(e) => setTitle(e.target.value)}
+            />
+            <textarea
+              placeholder="描述（可选）"
+              value={description}
+              rows={2}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+            <select value={assignee} onChange={(e) => setAssignee(e.target.value)}>
+              <option value="">进待认领池</option>
+              {assignable.map((a) => (
+                <option key={a.id} value={a.name}>
+                  {a.name}
+                </option>
+              ))}
+            </select>
+            <div className="form-actions">
+              <button className="primary-btn sm" disabled={!title.trim()} onClick={() => void create()}>
+                创建
+              </button>
+              <button className="ghost-btn" onClick={() => setCreating(false)}>
+                取消
+              </button>
+            </div>
+          </div>
         )}
+      </header>
+      {error && <p className="form-error">{error}</p>}
+      <div className="tasks-layout">
+        <div className="tasks-board">
+          {renderColumn("待认领", claimable)}
+          {renderColumn("进行中", active)}
+          {renderColumn("已完成", closed)}
+        </div>
+        <aside className="tasks-detail">
+          {!selectedId && <p className="empty">选择左侧任务查看时间线</p>}
+          {timeline && (
+            <>
+              <h3>{timeline.task.title}</h3>
+              <p className="tasks-detail-meta">
+                {TASK_STATUS_LABELS[timeline.task.status]} ·{" "}
+                {timeline.task.assigneeName ?? "未分派"}
+              </p>
+              {timeline.task.description && (
+                <p className="tasks-detail-desc">{timeline.task.description}</p>
+              )}
+              <ol className="task-timeline">
+                {timeline.items.length === 0 && (
+                  <li className="empty">还没有与此任务关联的消息、简报或交接。</li>
+                )}
+                {timeline.items.map((item, index) => {
+                  if (item.kind === "message") {
+                    return (
+                      <li key={"m-" + item.message.id + "-" + index} className="tl-message">
+                        <time>{timeAgo(item.at)}</time>
+                        <strong>{item.message.fromName}</strong>
+                        <p>{item.message.text}</p>
+                      </li>
+                    );
+                  }
+                  if (item.kind === "brief") {
+                    return (
+                      <li key={"b-" + item.brief.id + "-" + index} className="tl-brief">
+                        <time>{timeAgo(item.at)}</time>
+                        <strong>简报 · {item.brief.agentName}</strong>
+                        <p>
+                          {item.brief.title} — {item.brief.result.slice(0, 200)}
+                        </p>
+                      </li>
+                    );
+                  }
+                  return (
+                    <li key={"h-" + item.handoff.id + "-" + index} className="tl-handoff">
+                      <time>{timeAgo(item.at)}</time>
+                      <strong>
+                        交接 · {item.handoff.fromAgentName} → {item.handoff.toAgentName}
+                      </strong>
+                      <p>{item.handoff.summary}</p>
+                    </li>
+                  );
+                })}
+              </ol>
+            </>
+          )}
+        </aside>
       </div>
-      {dispatchOpen && (
-        <DispatchForm
-          agents={agents}
-          tasks={tasks}
-          onDone={onChanged}
-          onClose={() => setDispatchOpen(false)}
-        />
-      )}
-      {error && <p className="form-error">任务更新失败：{error}</p>}
-      <ul className="task-list">
-        {tasks.length === 0 && <li className="empty">暂无任务。点「分派工作」交给主管拆解。</li>}
-        {active.map(renderTask)}
-        {closed.length > 0 && <li className="task-divider">已结束（{closed.length}）</li>}
-        {closed.slice(0, 10).map(renderTask)}
-      </ul>
-    </section>
+    </div>
   );
 }
 
@@ -2050,7 +2275,7 @@ function TerminalBoard({ refreshKey }: { refreshKey: number }) {
 
 // ---------- 动态流 ----------
 
-/** 频道栏：大群 + 各项目组频道，支持建组/解散 */
+/** 频道栏：大群 + 各部门频道，支持建部门/解散 */
 function ChannelBar({
   groups,
   channel,
@@ -2081,7 +2306,16 @@ function ChannelBar({
   };
 
   const disband = async (group: OfficeGroup) => {
-    if (!window.confirm(`解散项目组「${group.name}」？成员回到大群，组内历史消息保留。`)) return;
+    if (group.name === "综合部") {
+      setError("默认部门「综合部」不可解散");
+      return;
+    }
+    if (
+      !window.confirm(
+        `解散部门「${group.name}」？其下职位回落综合部，部门频道历史消息保留。`,
+      )
+    )
+      return;
     try {
       await api.deleteGroup(group.id);
       if (channel === group.id) onSelect("hall");
@@ -2126,18 +2360,20 @@ function ChannelBar({
             aria-selected={channel === g.id}
             className={`channel-tab ${channel === g.id ? "active" : ""}`}
             onClick={() => onSelect(g.id)}
-            title={`项目组「${g.name}」（${g.memberCount ?? 0} 人）`}
+            title={`部门「${g.name}」（${g.memberCount ?? 0} 人）`}
           >
             # {g.name}
             <em>{g.memberCount ?? 0}</em>
           </button>
-          <button
-            className="channel-del"
-            title={`解散「${g.name}」`}
-            onClick={() => void disband(g)}
-          >
-            ×
-          </button>
+          {g.name !== "综合部" && (
+            <button
+              className="channel-del"
+              title={`解散「${g.name}」`}
+              onClick={() => void disband(g)}
+            >
+              ×
+            </button>
+          )}
         </span>
       ))}
       {creating ? (
@@ -2145,7 +2381,7 @@ function ChannelBar({
           <input
             value={name}
             autoFocus
-            placeholder="项目组名（如 画布 / 算力平台）"
+            placeholder="部门名（如 前端 / 平台）"
             onChange={(e) => setName(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") void create();
@@ -2153,20 +2389,20 @@ function ChannelBar({
             }}
           />
           <button className="primary-btn sm" onClick={() => void create()}>
-            建组
+            建部门
           </button>
           <button className="ghost-btn" onClick={() => setCreating(false)}>
             取消
           </button>
         </span>
       ) : (
-        <button className="channel-tab channel-add" title="新建项目组" onClick={() => setCreating(true)}>
-          ＋ 建组
+        <button className="channel-tab channel-add" title="新建部门" onClick={() => setCreating(true)}>
+          ＋ 建部门
         </button>
       )}
       <button
         className="channel-tab channel-clear"
-        title={`清空当前频道（${channel === "hall" ? "大群" : "组频道"}）的全部消息`}
+        title={`清空当前频道（${channel === "hall" ? "大群" : "部门频道"}）的全部消息`}
         onClick={() => void clear()}
       >
         🧹 清空
@@ -2418,6 +2654,8 @@ type KbCatalog = Array<{
     roleId: string | null;
     title: string;
     tags: string[];
+    sourceType?: string;
+    origin?: string | null;
     updatedAt: number;
   }>;
 }>;
@@ -2429,7 +2667,13 @@ function KbBoard({ refreshKey }: { refreshKey: number }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<KbDoc[] | null>(null);
   const [editing, setEditing] = useState<null | { id?: string; category: string; title: string; content: string; tags: string }>(null);
+  const [importing, setImporting] = useState<null | "paste" | "url" | "file">(null);
+  const [importCategory, setImportCategory] = useState("收录");
+  const [importTitle, setImportTitle] = useState("");
+  const [importContent, setImportContent] = useState("");
+  const [importUrl, setImportUrl] = useState("");
   const [error, setError] = useState("");
+  const [sourceFilter, setSourceFilter] = useState("");
 
   const loadCatalog = useCallback(() => {
     api.kbCatalog().then(({ catalog: c }) => setCatalog(c)).catch((e) => setError(e.message));
@@ -2499,7 +2743,83 @@ function KbBoard({ refreshKey }: { refreshKey: number }) {
     }
   };
 
+  const runImport = async () => {
+    try {
+      let created: KbDoc;
+      if (importing === "paste") {
+        created = await api.kbImport({
+          mode: "paste",
+          category: importCategory,
+          title: importTitle || undefined,
+          content: importContent,
+        });
+      } else if (importing === "url") {
+        created = await api.kbImport({
+          mode: "url",
+          category: importCategory,
+          title: importTitle || undefined,
+          url: importUrl,
+        });
+      } else {
+        return;
+      }
+      setImporting(null);
+      setImportContent("");
+      setImportUrl("");
+      setImportTitle("");
+      setSelectedId(created.id);
+      setDoc(created);
+      loadCatalog();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const importFile = async (file: File) => {
+    try {
+      const data = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = reader.result as string;
+          resolve(result.slice(result.indexOf(",") + 1));
+        };
+        reader.onerror = () => reject(new Error("读取文件失败"));
+        reader.readAsDataURL(file);
+      });
+      const created = await api.kbImport({
+        mode: "file",
+        category: importCategory || "收录",
+        title: importTitle || undefined,
+        filename: file.name,
+        mime: file.type,
+        data,
+      });
+      setImporting(null);
+      setSelectedId(created.id);
+      setDoc(created);
+      loadCatalog();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const SOURCE_LABELS_KB: Record<string, string> = {
+    manual: "手写",
+    upload: "上传",
+    url: "网页",
+    pdf: "PDF",
+    ai: "AI",
+  };
+
   const totalDocs = catalog.reduce((sum, c) => sum + c.docs.length, 0);
+  const filteredCatalog = catalog
+    .map((cat) => ({
+      ...cat,
+      docs: sourceFilter
+        ? cat.docs.filter((d) => (d.sourceType ?? "manual") === sourceFilter)
+        : cat.docs,
+    }))
+    .filter((cat) => cat.docs.length > 0);
 
   return (
     <div className="kb-wrap">
@@ -2523,6 +2843,30 @@ function KbBoard({ refreshKey }: { refreshKey: number }) {
         >
           ＋ 新建文档
         </button>
+        <div className="kb-import-actions">
+          <button className="ghost-btn sm" onClick={() => setImporting("paste")}>
+            粘贴收录
+          </button>
+          <button className="ghost-btn sm" onClick={() => setImporting("url")}>
+            URL 收录
+          </button>
+          <button className="ghost-btn sm" onClick={() => setImporting("file")}>
+            文件/PDF
+          </button>
+        </div>
+        <select
+          className="kb-source-filter"
+          value={sourceFilter}
+          onChange={(e) => setSourceFilter(e.target.value)}
+          aria-label="按来源筛选"
+        >
+          <option value="">全部来源</option>
+          <option value="manual">手写</option>
+          <option value="upload">上传</option>
+          <option value="url">网页</option>
+          <option value="pdf">PDF</option>
+          <option value="ai">AI</option>
+        </select>
         {results !== null ? (
           <div className="kb-tree">
             <div className="kb-cat-head">搜索结果（{results.length}）</div>
@@ -2533,19 +2877,22 @@ function KbBoard({ refreshKey }: { refreshKey: number }) {
                 onClick={() => setSelectedId(d.id)}
               >
                 <span>{d.title}</span>
-                <small>{d.category}</small>
+                <small>
+                  {d.category}
+                  {d.sourceType ? ` · ${SOURCE_LABELS_KB[d.sourceType] ?? d.sourceType}` : ""}
+                </small>
               </button>
             ))}
             {results.length === 0 && <p className="empty">没有匹配的文档。</p>}
           </div>
         ) : (
           <div className="kb-tree">
-            {catalog.length === 0 && (
+            {filteredCatalog.length === 0 && (
               <p className="empty">
-                知识库还是空的。把遇到的疑难杂症和解决方案沉淀进来，全办公室共享；Agent 也能通过 kb_write 自动写入。
+                知识库还是空的。可新建、粘贴、贴 URL、上传 md/txt/pdf，或由 Agent 用 kb_write 写入。
               </p>
             )}
-            {catalog.map((cat) => (
+            {filteredCatalog.map((cat) => (
               <div key={cat.category} className="kb-cat">
                 <div className="kb-cat-head">
                   {cat.category}
@@ -2558,7 +2905,11 @@ function KbBoard({ refreshKey }: { refreshKey: number }) {
                     onClick={() => setSelectedId(d.id)}
                   >
                     <span>{d.title}</span>
-                    {d.tags.length > 0 && <small>{d.tags.join(" · ")}</small>}
+                    <small>
+                      {[SOURCE_LABELS_KB[d.sourceType ?? "manual"], ...(d.tags ?? [])]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </small>
                   </button>
                 ))}
               </div>
@@ -2570,6 +2921,62 @@ function KbBoard({ refreshKey }: { refreshKey: number }) {
 
       <section className="kb-main">
         {error && <p className="form-error">{error}</p>}
+        {importing && (
+          <div className="kb-editor kb-import">
+            <h3>
+              {importing === "paste"
+                ? "粘贴收录"
+                : importing === "url"
+                  ? "URL 收录"
+                  : "文件 / PDF 收录"}
+            </h3>
+            <input
+              placeholder="目录分类"
+              value={importCategory}
+              onChange={(e) => setImportCategory(e.target.value)}
+            />
+            <input
+              placeholder="标题（可选）"
+              value={importTitle}
+              onChange={(e) => setImportTitle(e.target.value)}
+            />
+            {importing === "paste" && (
+              <textarea
+                rows={12}
+                placeholder="粘贴正文…"
+                value={importContent}
+                onChange={(e) => setImportContent(e.target.value)}
+              />
+            )}
+            {importing === "url" && (
+              <input
+                placeholder="https://…"
+                value={importUrl}
+                onChange={(e) => setImportUrl(e.target.value)}
+              />
+            )}
+            {importing === "file" && (
+              <input
+                type="file"
+                accept=".md,.txt,.markdown,.pdf,text/plain,text/markdown,application/pdf"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) void importFile(file);
+                }}
+              />
+            )}
+            <div className="form-actions">
+              {importing !== "file" && (
+                <button className="primary-btn sm" onClick={() => void runImport()}>
+                  收录
+                </button>
+              )}
+              <button className="ghost-btn" onClick={() => setImporting(null)}>
+                取消
+              </button>
+            </div>
+          </div>
+        )}
         {editing ? (
           <div className="kb-editor">
             <h3>{editing.id ? "编辑文档" : "新建知识库文档"}</h3>
@@ -2622,6 +3029,8 @@ function KbBoard({ refreshKey }: { refreshKey: number }) {
                 <span className="kb-crumb">{doc.category}</span>
                 <h2>{doc.title}</h2>
                 <p className="kb-meta">
+                  {doc.sourceType ? `${SOURCE_LABELS_KB[doc.sourceType] ?? doc.sourceType} · ` : ""}
+                  {doc.origin ? `${doc.origin} · ` : ""}
                   {doc.author ? `${doc.author} · ` : ""}更新于 {timeAgo(doc.updatedAt)}
                   {doc.tags.length > 0 && <> · {doc.tags.map((t) => <span key={t} className="kb-tag">{t}</span>)}</>}
                 </p>
@@ -2668,9 +3077,10 @@ export function App() {
   const [health, setHealth] = useState<Health | null>(null);
   const [mentionPrefill, setMentionPrefill] = useState("");
   const [view, setView] = useState<
-    "office" | "pixel" | "live" | "terminal" | "shell" | "logs" | "kb"
+    "office" | "pixel" | "live" | "terminal" | "shell" | "logs" | "kb" | "tasks"
   >("office");
   const [channel, setChannel] = useState("hall");
+  const [focusTaskId, setFocusTaskId] = useState<string | null>(null);
   const [onboardOpen, setOnboardOpen] = useState(false);
   const [onboardTab, setOnboardTab] = useState<OnboardTabId>("cursor");
   const [agentQuery, setAgentQuery] = useState("");
@@ -2877,6 +3287,14 @@ export function App() {
           </button>
           <button
             role="tab"
+            aria-selected={view === "tasks"}
+            className={view === "tasks" ? "active" : ""}
+            onClick={() => setView("tasks")}
+          >
+            任务
+          </button>
+          <button
+            role="tab"
             aria-selected={view === "terminal"}
             className={view === "terminal" ? "active" : ""}
             onClick={() => setView("terminal")}
@@ -2955,6 +3373,17 @@ export function App() {
       ) : view === "live" ? (
         <main className="live-main">
           <LiveBoard state={state} />
+        </main>
+      ) : view === "tasks" ? (
+        <main className="tasks-main">
+          <TasksBoard
+            tasks={state.tasks}
+            agents={state.agents}
+            briefs={state.briefs}
+            focusTaskId={focusTaskId}
+            onChanged={refresh}
+            onFocusConsumed={() => setFocusTaskId(null)}
+          />
         </main>
       ) : view === "terminal" ? (
         <main className="terminal-main">
@@ -3042,8 +3471,22 @@ export function App() {
           </section>
 
           <aside className="col col-right">
-            <BriefWall briefs={state.briefs} />
-            <TaskPanel tasks={state.tasks} agents={state.agents} onChanged={refresh} />
+            <BriefWall
+              briefs={state.briefs}
+              tasks={state.tasks}
+              onOpenTask={(taskId) => {
+                setFocusTaskId(taskId);
+                setView("tasks");
+              }}
+            />
+            <TaskPanel
+              tasks={state.tasks}
+              onOpenTasks={() => setView("tasks")}
+              onOpenTask={(taskId) => {
+                setFocusTaskId(taskId);
+                setView("tasks");
+              }}
+            />
           </aside>
         </main>
       )}

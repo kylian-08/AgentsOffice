@@ -129,6 +129,64 @@ export const MIGRATIONS: Migration[] = [
       );
     },
   },
+  {
+    version: 8,
+    name: "messages/briefs.task_id 任务时间线索引",
+    detect: (db) => hasIndex(db, "idx_messages_task") && hasIndex(db, "idx_briefs_task"),
+    up: (db) => {
+      db.exec("CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id, created_at)");
+      db.exec("CREATE INDEX IF NOT EXISTS idx_briefs_task ON briefs(task_id, created_at)");
+    },
+  },
+  {
+    version: 9,
+    name: "roles.group_id 职位隶属部门",
+    detect: (db) => {
+      if (!hasColumn(db, "roles", "group_id")) return false;
+      const nulls = db
+        .prepare("SELECT COUNT(*) AS cnt FROM roles WHERE group_id IS NULL OR group_id = ''")
+        .get() as { cnt: number };
+      const dept = db
+        .prepare("SELECT 1 AS found FROM groups WHERE name = ? COLLATE NOCASE")
+        .get("综合部") as { found: number } | undefined;
+      return nulls.cnt === 0 && Boolean(dept);
+    },
+    up: (db) => {
+      if (!hasColumn(db, "roles", "group_id")) {
+        db.exec("ALTER TABLE roles ADD COLUMN group_id TEXT");
+      }
+      // 确保默认部门「综合部」存在，并把无部门职位归入
+      let dept = db
+        .prepare("SELECT id FROM groups WHERE name = ? COLLATE NOCASE")
+        .get("综合部") as { id: string } | undefined;
+      if (!dept) {
+        const id = `dept-default-${now()}`;
+        db.prepare("INSERT INTO groups(id, name, created_at) VALUES (?, ?, ?)").run(
+          id,
+          "综合部",
+          now(),
+        );
+        dept = { id };
+      }
+      db.prepare("UPDATE roles SET group_id = ? WHERE group_id IS NULL OR group_id = ''").run(
+        dept.id,
+      );
+    },
+  },
+  {
+    version: 10,
+    name: "kb_docs.source_type/origin 文档收录来源",
+    detect: (db) =>
+      hasColumn(db, "kb_docs", "source_type") && hasColumn(db, "kb_docs", "origin"),
+    up: (db) => {
+      if (!hasColumn(db, "kb_docs", "source_type")) {
+        db.exec("ALTER TABLE kb_docs ADD COLUMN source_type TEXT NOT NULL DEFAULT 'manual'");
+      }
+      if (!hasColumn(db, "kb_docs", "origin")) {
+        db.exec("ALTER TABLE kb_docs ADD COLUMN origin TEXT");
+      }
+    },
+  },
 ];
 
 function recordApplied(db: DatabaseSync, migration: Migration): void {

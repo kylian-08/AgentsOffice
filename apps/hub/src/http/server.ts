@@ -301,11 +301,24 @@ export async function createServer(
   app.get("/api/roles", async () => ({ roles: office.store.listRoles() }));
 
   app.post("/api/roles", async (request, reply) => {
-    const body = (request.body ?? {}) as { name?: string; description?: string };
+    const body = (request.body ?? {}) as {
+      name?: string;
+      description?: string;
+      groupId?: string;
+    };
     if (!body.name?.trim()) return reply.code(400).send({ error: "name 不能为空" });
-    const result = office.createRole(body.name, body.description);
+    const result = office.createRole(body.name, body.description, body.groupId);
     if (!result.ok) return reply.code(409).send({ error: result.error });
     return result.role;
+  });
+
+  app.patch("/api/roles/:id", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = (request.body ?? {}) as { groupId?: string };
+    if (!body.groupId?.trim()) return reply.code(400).send({ error: "groupId 不能为空" });
+    const result = office.setRoleDepartment(id, body.groupId.trim());
+    if (!result.ok) return reply.code(404).send({ error: result.error });
+    return { ok: true, role: office.store.getRoleById(id) };
   });
 
   app.delete("/api/roles/:id", async (request, reply) => {
@@ -401,6 +414,13 @@ export async function createServer(
     });
     if (!task) return reply.code(404).send({ error: "任务不存在" });
     return task;
+  });
+
+  app.get("/api/tasks/:id/timeline", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const timeline = office.getTaskTimeline(id);
+    if (!timeline) return reply.code(404).send({ error: "任务不存在" });
+    return timeline;
   });
 
   app.post("/api/agents/managed", async (request, reply) => {
@@ -617,8 +637,33 @@ export async function createServer(
       content: body.content,
       tags: body.tags,
       author: body.author?.trim() || office.bossName(),
+      sourceType: "manual",
     });
     return result!.doc;
+  });
+
+  app.post("/api/kb/import", async (request, reply) => {
+    const body = (request.body ?? {}) as {
+      mode?: "paste" | "url" | "file";
+      category?: string;
+      title?: string;
+      content?: string;
+      url?: string;
+      filename?: string;
+      mime?: string;
+      data?: string;
+      tags?: string[];
+    };
+    if (!body.mode || !["paste", "url", "file"].includes(body.mode)) {
+      return reply.code(400).send({ error: "mode 必须是 paste、url 或 file" });
+    }
+    const result = await office.kbImport({
+      ...body,
+      mode: body.mode,
+      author: office.bossName(),
+    });
+    if (!result.ok) return reply.code(400).send({ error: result.error });
+    return result.doc;
   });
 
   app.patch("/api/kb/docs/:id", async (request, reply) => {

@@ -235,8 +235,9 @@ describe("职位与岗位档案交接", () => {
   it("清空频道消息：只清目标频道，投递与档案索引一并清理", () => {
     const office = makeOffice();
     const group = office.createGroup("画布").group!;
+    const role = office.createRole("画布岗", undefined, group.id).role!;
     const agent = office.store.registerAgent({ name: "codex-1", kind: "codex-cli" });
-    office.assignGroups(agent.id, [group.id]);
+    office.assignRole(agent.id, role.id);
 
     office.sendMessage({ fromName: "老板", text: "大群消息 @codex-1" });
     office.sendMessage({ fromName: "老板", text: "组内消息", channel: group.id });
@@ -259,9 +260,12 @@ describe("清空频道连操作记录", () => {
   it("hall 清空可连全部事件一起清；组频道只清本组成员事件", () => {
     const office = makeOffice();
     const group = office.createGroup("画布").group!;
+    const roleIn = office.createRole("画布岗", undefined, group.id).role!;
+    const roleOut = office.createRole("综合岗").role!;
     const inGroup = office.store.registerAgent({ name: "codex-in", kind: "codex-cli" });
     const outGroup = office.store.registerAgent({ name: "codex-out", kind: "codex-cli" });
-    office.assignGroups(inGroup.id, [group.id]);
+    office.assignRole(inGroup.id, roleIn.id);
+    office.assignRole(outGroup.id, roleOut.id);
     office.event({ type: "run", agentId: inGroup.id, text: "组内事件" });
     office.event({ type: "run", agentId: outGroup.id, text: "组外事件" });
 

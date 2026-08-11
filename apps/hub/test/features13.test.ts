@@ -91,12 +91,12 @@ describe("任务交接自动唤醒", () => {
     expect(dispatched).toEqual([target.name]);
   });
 
-  it("目标无法续聊时创建新 Codex CLI，并继承职位、项目组和工作区", () => {
+  it("目标无法续聊时创建新 Codex CLI，并继承职位、部门和工作区", () => {
     const office = makeOffice();
     const dispatched: string[] = [];
     office.setManagedDispatcher((agent) => dispatched.push(agent.name));
-    const role = office.createRole("客户端开发", "负责客户端").role!;
     const group = office.createGroup("客户端组").group!;
+    const role = office.createRole("客户端开发", "负责客户端", group.id).role!;
     const source = office.store.registerAgent({ name: "codex-A", kind: "codex-managed" });
     const cursor = office.store.registerAgent({
       name: "cursor-B",
@@ -105,7 +105,6 @@ describe("任务交接自动唤醒", () => {
       meta: { model: "composer" },
     });
     office.assignRole(cursor.id, role.id);
-    office.assignGroups(cursor.id, [group.id]);
 
     const result = office.handoffTask({
       fromAgent: source.name,

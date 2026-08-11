@@ -107,12 +107,18 @@ export const api = {
     }).then((r) => json<OfficeGroup>(r)),
   deleteGroup: (id: string) =>
     fetch(`/api/groups/${id}`, { method: "DELETE" }).then((r) => json<{ ok: boolean }>(r)),
-  createRole: (name: string, description?: string) =>
+  createRole: (name: string, description?: string, groupId?: string) =>
     fetch("/api/roles", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name, description }),
+      body: JSON.stringify({ name, description, groupId }),
     }).then((r) => json<OfficeRole>(r)),
+  setRoleDepartment: (id: string, groupId: string) =>
+    fetch(`/api/roles/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ groupId }),
+    }).then((r) => json<{ ok: boolean; role: OfficeRole }>(r)),
   deleteRole: (id: string) =>
     fetch(`/api/roles/${id}`, { method: "DELETE" }).then((r) => json<{ ok: boolean }>(r)),
   roleDossier: (id: string) =>
@@ -143,6 +149,28 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(patch),
     }).then((r) => json<OfficeTask>(r)),
+  taskTimeline: (id: string) =>
+    fetch(`/api/tasks/${id}/timeline`).then((r) =>
+      json<{
+        task: OfficeTask;
+        items: Array<
+          | { kind: "message"; at: number; message: OfficeMessage }
+          | { kind: "brief"; at: number; brief: OfficeBrief }
+          | {
+              kind: "handoff";
+              at: number;
+              handoff: {
+                id: string;
+                fromAgentName: string;
+                toAgentName: string;
+                summary: string;
+                status: string;
+                createdAt: number;
+              };
+            }
+        >;
+      }>(r),
+    ),
   createManagedAgent: (input: {
     name: string;
     kind: "codex" | "cursor" | "claude" | "kimi" | "qoder" | "kilo";
@@ -227,6 +255,8 @@ export const api = {
             roleId: string | null;
             title: string;
             tags: string[];
+            sourceType?: string;
+            origin?: string | null;
             updatedAt: number;
           }>;
         }>;
@@ -237,6 +267,22 @@ export const api = {
   kbDoc: (id: string) => fetch(`/api/kb/docs/${id}`).then((r) => json<KbDoc>(r)),
   kbCreate: (input: { category: string; title: string; content: string; tags?: string[] }) =>
     fetch("/api/kb/docs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    }).then((r) => json<KbDoc>(r)),
+  kbImport: (input: {
+    mode: "paste" | "url" | "file";
+    category?: string;
+    title?: string;
+    content?: string;
+    url?: string;
+    filename?: string;
+    mime?: string;
+    data?: string;
+    tags?: string[];
+  }) =>
+    fetch("/api/kb/import", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(input),

@@ -19,8 +19,8 @@ function makeOffice() {
   return new OfficeService(store, new OfficeBus());
 }
 
-describe("项目组与频道", () => {
-  it("建组/多组分配/解散，组名唯一", () => {
+describe("部门与频道", () => {
+  it("建部门/职位归属/解散，部门名唯一", () => {
     const office = makeOffice();
     const created = office.createGroup("画布");
     expect(created.ok).toBe(true);
@@ -28,36 +28,44 @@ describe("项目组与频道", () => {
     expect(office.createGroup("  ").ok).toBe(false);
     const g2 = office.createGroup("算力平台").group!;
 
-    // 同时在两个组
+    const roleA = office.createRole("画布开发", undefined, created.group!.id).role!;
+    const roleB = office.createRole("平台开发", undefined, g2.id).role!;
     const a = office.store.registerAgent({ name: "codex-画布", kind: "codex-managed" });
-    expect(office.assignGroups(a.id, [created.group!.id, g2.id]).ok).toBe(true);
-    const card = office.store.listAgents().find((x) => x.id === a.id)!;
-    expect(card.groupIds).toEqual([created.group!.id, g2.id]);
-    expect(card.groupNames).toEqual(["画布", "算力平台"]);
-    expect(office.store.listGroups().map((g) => g.memberCount)).toEqual([1, 1]);
+    expect(office.assignRole(a.id, roleA.id).ok).toBe(true);
+    let card = office.store.listAgents().find((x) => x.id === a.id)!;
+    expect(card.groupIds).toEqual([created.group!.id]);
+    expect(card.groupNames).toEqual(["画布"]);
 
-    // 无效组整体失败，原归属不变
-    expect(office.assignGroups(a.id, ["no-such"]).ok).toBe(false);
-    expect(office.store.agentGroupIds(a.id)).toHaveLength(2);
+    // 换岗即换部门
+    expect(office.assignRole(a.id, roleB.id).ok).toBe(true);
+    card = office.store.listAgents().find((x) => x.id === a.id)!;
+    expect(card.groupIds).toEqual([g2.id]);
+    expect(card.groupNames).toEqual(["算力平台"]);
 
-    // boss/主管不入组
+    // boss/主管不入部门
     const boss = office.store.listAgents().find((x) => x.kind === "user")!;
     expect(office.assignGroups(boss.id, [created.group!.id]).ok).toBe(false);
 
-    // 解散一个组只影响该组归属
-    expect(office.deleteGroup(created.group!.id).ok).toBe(true);
-    expect(office.store.agentGroupIds(a.id)).toEqual([g2.id]);
-    // 退出所有组
-    expect(office.assignGroups(a.id, []).ok).toBe(true);
-    expect(office.store.agentGroupIds(a.id)).toEqual([]);
+    // 解散部门：职位回落综合部
+    expect(office.deleteGroup(g2.id).ok).toBe(true);
+    expect(office.store.getRoleById(roleB.id)?.groupName).toBe("综合部");
+    card = office.store.listAgents().find((x) => x.id === a.id)!;
+    expect(card.groupNames).toEqual(["综合部"]);
+
+    // 默认综合部不可解散
+    const general = office.store.getGroupByName("综合部")!;
+    expect(office.deleteGroup(general.id).ok).toBe(false);
   });
 
-  it("消息落到指定频道，组频道 @all 只喊本组人", () => {
+  it("消息落到指定频道，部门频道 @all 只喊本部门人", () => {
     const office = makeOffice();
     const g = office.createGroup("画布").group!;
+    const roleIn = office.createRole("画布岗", undefined, g.id).role!;
+    const roleOut = office.createRole("综合岗").role!;
     const inGroup = office.store.registerAgent({ name: "codex-组内", kind: "codex-cli" });
     const outGroup = office.store.registerAgent({ name: "codex-组外", kind: "codex-cli" });
-    office.assignGroups(inGroup.id, [g.id]);
+    office.assignRole(inGroup.id, roleIn.id);
+    office.assignRole(outGroup.id, roleOut.id);
 
     const result = office.sendMessage({ fromName: "老板", text: "@all 开个组会", channel: g.id });
     expect(result.routed.map((r) => r.name)).toEqual(["codex-组内"]);
@@ -80,13 +88,14 @@ describe("项目组与频道", () => {
   it("托管回复落回来源频道；组内可显式 @ 组外成员", async () => {
     const office = makeOffice();
     const g = office.createGroup("算力平台").group!;
+    const role = office.createRole("网关岗", undefined, g.id).role!;
     office.setManagedDispatcher(
       createManagedDispatcher(office, testConfig, {
         "codex-managed": async () => ({ text: "组会开完了" }),
       }),
     );
     const worker = office.store.registerAgent({ name: "codex-网关", kind: "codex-managed" });
-    office.assignGroups(worker.id, [g.id]);
+    office.assignRole(worker.id, role.id);
 
     office.sendMessage({ fromName: "老板", text: "@codex-网关 汇报进度", channel: g.id });
     await vi.waitFor(() => {
@@ -101,22 +110,27 @@ describe("项目组与频道", () => {
     expect(office.store.pendingCount(outsider.id)).toBe(1);
   });
 
-  it("同时在多个组的员工，两个组频道的 @all 都能喊到", () => {
+  it("同部门多员工都能被部门频道 @all 喊到，跨部门喊不到", () => {
     const office = makeOffice();
     const g1 = office.createGroup("画布").group!;
     const g2 = office.createGroup("服务端").group!;
-    const both = office.store.registerAgent({ name: "codex-双栖", kind: "codex-cli" });
-    const only1 = office.store.registerAgent({ name: "codex-单组", kind: "codex-cli" });
-    office.assignGroups(both.id, [g1.id, g2.id]);
-    office.assignGroups(only1.id, [g1.id]);
+    const role1 = office.createRole("画布岗", undefined, g1.id).role!;
+    const role2 = office.createRole("服务端岗", undefined, g2.id).role!;
+    const a = office.store.registerAgent({ name: "codex-画布甲", kind: "codex-cli" });
+    const b = office.store.registerAgent({ name: "codex-画布乙", kind: "codex-cli" });
+    const c = office.store.registerAgent({ name: "codex-服务端", kind: "codex-cli" });
+    office.assignRole(a.id, role1.id);
+    office.assignRole(b.id, role1.id);
+    office.assignRole(c.id, role2.id);
 
     office.sendMessage({ fromName: "老板", text: "@all 画布组开会", channel: g1.id });
-    expect(office.store.pendingCount(both.id)).toBe(1);
-    expect(office.store.pendingCount(only1.id)).toBe(1);
+    expect(office.store.pendingCount(a.id)).toBe(1);
+    expect(office.store.pendingCount(b.id)).toBe(1);
+    expect(office.store.pendingCount(c.id)).toBe(0);
 
     office.sendMessage({ fromName: "老板", text: "@all 服务端组开会", channel: g2.id });
-    expect(office.store.pendingCount(both.id)).toBe(2);
-    expect(office.store.pendingCount(only1.id)).toBe(1);
+    expect(office.store.pendingCount(c.id)).toBe(1);
+    expect(office.store.pendingCount(a.id)).toBe(1);
   });
 });
 

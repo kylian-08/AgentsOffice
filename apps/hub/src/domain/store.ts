@@ -7,6 +7,7 @@ import type {
   AgentStatus,
   BriefInput,
   KbDoc,
+  KbSourceType,
   OfficeBrief,
   OfficeEvent,
   OfficeGroup,
@@ -17,7 +18,10 @@ import type {
   TaskHandoff,
   TaskHandoffStatus,
   TaskStatus,
+  TaskTimeline,
+  TaskTimelineItem,
 } from "@agent-office/protocol";
+import { DEFAULT_DEPARTMENT_NAME } from "@agent-office/protocol";
 import { now, uuid } from "../util.js";
 import { applyMigrations } from "./migrations.js";
 
@@ -349,12 +353,59 @@ export class OfficeStore {
     }));
   }
 
-  /** 解散项目组：成员退出该组（其他组归属与大群不受影响），组频道历史消息保留 */
+  /** 解散部门：职位回落综合部，成员退出该部门频道；历史消息保留 */
   deleteGroup(id: string): boolean {
     if (!this.getGroupById(id)) return false;
+    const fallback = this.ensureDefaultDepartment();
+    if (fallback.id !== id) {
+      this.db.prepare("UPDATE roles SET group_id = ? WHERE group_id = ?").run(fallback.id, id);
+    } else {
+      // 不允许删综合部时把职位挂空：若真要删，职位 group_id 置空再由下次 ensure 补回
+      this.db.prepare("UPDATE roles SET group_id = NULL WHERE group_id = ?").run(id);
+    }
     this.db.prepare("DELETE FROM group_members WHERE group_id = ?").run(id);
     this.db.prepare("DELETE FROM groups WHERE id = ?").run(id);
     return true;
+  }
+
+  /** 确保默认部门「综合部」存在并返回 */
+  ensureDefaultDepartment(): OfficeGroup {
+    const existing = this.getGroupByName(DEFAULT_DEPARTMENT_NAME);
+    if (existing) return existing;
+    const created = this.createGroup(DEFAULT_DEPARTMENT_NAME);
+    if (!created) {
+      // 竞态下可能刚被插入
+      return this.getGroupByName(DEFAULT_DEPARTMENT_NAME)!;
+    }
+    return created;
+  }
+
+  /** 把员工同步到其职位所属部门（单部门归属） */
+  syncAgentToRoleDepartment(agentId: string): void {
+    const agent = this.getAgentById(agentId);
+    if (!agent || agent.kind === "user" || agent.kind === "supervisor") return;
+    const roleId = (agent.meta as { roleId?: string }).roleId;
+    if (!roleId) {
+      this.setAgentGroups(agentId, []);
+      return;
+    }
+    const role = this.getRoleById(roleId);
+    const deptId = role?.groupId ?? this.ensureDefaultDepartment().id;
+    this.setAgentGroups(agentId, [deptId]);
+  }
+
+  /** Hub 启动时为全体在岗员工补齐部门归属 */
+  syncAllAgentsToRoleDepartments(): number {
+    this.ensureDefaultDepartment();
+    let n = 0;
+    for (const agent of this.listAgents()) {
+      if (agent.kind === "user" || agent.kind === "supervisor") continue;
+      const before = (agent.groupIds ?? []).join(",");
+      this.syncAgentToRoleDepartment(agent.id);
+      const after = this.agentGroupIds(agent.id).join(",");
+      if (before !== after) n += 1;
+    }
+    return n;
   }
 
   /** 整体覆盖一名员工的组归属（可同时在多个组）；有任一组不存在则整体失败 */
@@ -382,12 +433,16 @@ export class OfficeStore {
 
   // ---------- 职位（岗位上下文的锚点） ----------
 
-  createRole(name: string, description?: string): OfficeRole | null {
+  createRole(name: string, description?: string, groupId?: string | null): OfficeRole | null {
     const id = uuid();
+    const deptId = groupId?.trim() || this.ensureDefaultDepartment().id;
+    if (!this.getGroupById(deptId)) return null;
     try {
       this.db
-        .prepare("INSERT INTO roles(id, name, description, created_at) VALUES (?, ?, ?, ?)")
-        .run(id, name.trim(), description?.trim() || null, now());
+        .prepare(
+          "INSERT INTO roles(id, name, description, group_id, created_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .run(id, name.trim(), description?.trim() || null, deptId, now());
     } catch {
       return null; // 重名
     }
@@ -395,16 +450,46 @@ export class OfficeStore {
   }
 
   getRoleById(id: string): OfficeRole | null {
-    const row = this.db.prepare("SELECT * FROM roles WHERE id = ?").get(id) as
-      | { id: string; name: string; description: string | null; created_at: number }
+    const row = this.db
+      .prepare(
+        `SELECT r.*, g.name AS group_name FROM roles r
+         LEFT JOIN groups g ON g.id = r.group_id WHERE r.id = ?`,
+      )
+      .get(id) as
+      | {
+          id: string;
+          name: string;
+          description: string | null;
+          group_id: string | null;
+          group_name: string | null;
+          created_at: number;
+        }
       | undefined;
     if (!row) return null;
-    return { id: row.id, name: row.name, description: row.description, createdAt: row.created_at };
+    return {
+      id: row.id,
+      name: row.name,
+      description: row.description,
+      groupId: row.group_id,
+      groupName: row.group_name,
+      createdAt: row.created_at,
+    };
   }
 
   listRoles(): OfficeRole[] {
-    const rows = this.db.prepare("SELECT * FROM roles ORDER BY created_at ASC").all() as
-      unknown as Array<{ id: string; name: string; description: string | null; created_at: number }>;
+    const rows = this.db
+      .prepare(
+        `SELECT r.*, g.name AS group_name FROM roles r
+         LEFT JOIN groups g ON g.id = r.group_id ORDER BY r.created_at ASC`,
+      )
+      .all() as unknown as Array<{
+      id: string;
+      name: string;
+      description: string | null;
+      group_id: string | null;
+      group_name: string | null;
+      created_at: number;
+    }>;
     const agents = this.listAgents();
     const noteStmt = this.db.prepare(
       "SELECT COUNT(*) AS cnt FROM role_notes WHERE role_id = ?",
@@ -413,12 +498,28 @@ export class OfficeStore {
       id: row.id,
       name: row.name,
       description: row.description,
+      groupId: row.group_id,
+      groupName: row.group_name,
       createdAt: row.created_at,
       holderNames: agents
         .filter((a) => (a.meta as { roleId?: string }).roleId === row.id)
         .map((a) => a.name),
       noteCount: (noteStmt.get(row.id) as { cnt: number }).cnt,
     }));
+  }
+
+  /** 调整职位所属部门；返回是否成功 */
+  setRoleDepartment(roleId: string, groupId: string): boolean {
+    const role = this.getRoleById(roleId);
+    if (!role) return false;
+    if (!this.getGroupById(groupId)) return false;
+    this.db.prepare("UPDATE roles SET group_id = ? WHERE id = ?").run(groupId, roleId);
+    for (const agent of this.listAgents()) {
+      if ((agent.meta as { roleId?: string }).roleId === roleId) {
+        this.syncAgentToRoleDepartment(agent.id);
+      }
+    }
+    return true;
   }
 
   /**
@@ -463,17 +564,19 @@ export class OfficeStore {
     return true;
   }
 
-  /** 任免：roleId 为 null 表示卸任。职位显示名同步进 meta.title */
+  /** 任免：roleId 为 null 表示卸任。职位显示名同步进 meta.title；部门跟随职位 */
   setAgentRole(agentId: string, roleId: string | null): boolean {
     const agent = this.getAgentById(agentId);
     if (!agent) return false;
     if (roleId === null) {
       this.updateAgentMeta(agentId, { roleId: undefined, title: undefined });
+      this.syncAgentToRoleDepartment(agentId);
       return true;
     }
     const role = this.getRoleById(roleId);
     if (!role) return false;
     this.updateAgentMeta(agentId, { roleId, title: role.name });
+    this.syncAgentToRoleDepartment(agentId);
     return true;
   }
 
@@ -967,6 +1070,89 @@ export class OfficeStore {
     return rows.map((r) => this.getTask(r.id)!).filter(Boolean);
   }
 
+  listMessagesByTask(taskId: string): OfficeMessage[] {
+    const rows = this.db
+      .prepare(
+        `SELECT m.id, m.from_agent_id, m.text, m.mentions, m.task_id, m.channel, m.images, m.created_at,
+                COALESCE(a.name, m.from_name) AS from_name FROM messages m
+         LEFT JOIN agents a ON a.id = m.from_agent_id
+         WHERE m.task_id = ?
+         ORDER BY m.created_at ASC`,
+      )
+      .all(taskId) as unknown as Array<{
+      id: string;
+      from_agent_id: string | null;
+      from_name: string | null;
+      text: string;
+      mentions: string;
+      task_id: string | null;
+      channel: string;
+      images: string;
+      created_at: number;
+    }>;
+    const deliveryStmt = this.db.prepare(
+      `SELECT d.status, a.name AS to_name FROM deliveries d
+       JOIN agents a ON a.id = d.to_agent_id WHERE d.message_id = ?`,
+    );
+    return rows.map((row) => ({
+      id: row.id,
+      fromAgentId: row.from_agent_id,
+      fromName: row.from_name ?? "系统",
+      text: row.text,
+      mentions: JSON.parse(row.mentions) as string[],
+      taskId: row.task_id,
+      channel: row.channel ?? "hall",
+      images: JSON.parse(row.images ?? "[]") as string[],
+      createdAt: row.created_at,
+      deliveries: (
+        deliveryStmt.all(row.id) as unknown as Array<{
+          status: "pending" | "read";
+          to_name: string;
+        }>
+      ).map((d) => ({ toName: d.to_name, status: d.status })),
+    }));
+  }
+
+  listBriefsByTask(taskId: string): OfficeBrief[] {
+    const rows = this.db
+      .prepare(
+        `SELECT b.*, COALESCE(a.name, '已离职成员') AS agent_name FROM briefs b
+         LEFT JOIN agents a ON a.id = b.agent_id
+         WHERE b.task_id = ?
+         ORDER BY b.created_at ASC`,
+      )
+      .all(taskId) as unknown as Array<Record<string, unknown>>;
+    return rows.map((r) => this.briefFromRow(r));
+  }
+
+  listHandoffsByTask(taskId: string): TaskHandoff[] {
+    const rows = this.db
+      .prepare(
+        "SELECT id FROM task_handoffs WHERE task_id = ? ORDER BY created_at ASC",
+      )
+      .all(taskId) as unknown as Array<{ id: string }>;
+    return rows.map((r) => this.getTaskHandoff(r.id)!).filter(Boolean);
+  }
+
+  /** 任务时间线：消息 + 简报 + 交接按时间升序 */
+  getTaskTimeline(taskId: string): TaskTimeline | null {
+    const task = this.getTask(taskId);
+    if (!task) return null;
+    const items: TaskTimelineItem[] = [
+      ...this.listMessagesByTask(taskId).map(
+        (message): TaskTimelineItem => ({ kind: "message", at: message.createdAt, message }),
+      ),
+      ...this.listBriefsByTask(taskId).map(
+        (brief): TaskTimelineItem => ({ kind: "brief", at: brief.createdAt, brief }),
+      ),
+      ...this.listHandoffsByTask(taskId).map(
+        (handoff): TaskTimelineItem => ({ kind: "handoff", at: handoff.createdAt, handoff }),
+      ),
+    ];
+    items.sort((a, b) => a.at - b.at);
+    return { task, items };
+  }
+
   updateTask(
     id: string,
     patch: { status?: TaskStatus; assigneeAgentId?: string | null },
@@ -1275,12 +1461,14 @@ export class OfficeStore {
     tags?: string[];
     author?: string | null;
     roleId?: string | null;
+    sourceType?: KbSourceType;
+    origin?: string | null;
   }): KbDoc {
     const id = uuid();
     this.db
       .prepare(
-        `INSERT INTO kb_docs(id, role_id, category, title, content, tags, author, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO kb_docs(id, role_id, category, title, content, tags, author, source_type, origin, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -1290,6 +1478,8 @@ export class OfficeStore {
         input.content,
         JSON.stringify(input.tags ?? []),
         input.author ?? null,
+        input.sourceType ?? "manual",
+        input.origin ?? null,
         now(),
         now(),
       );
@@ -1333,17 +1523,33 @@ export class OfficeStore {
   /** 目录索引：分类 → 文档标题清单（不含正文，供快速索引） */
   kbCatalog(): Array<{
     category: string;
-    docs: Array<{ id: string; roleId: string | null; title: string; tags: string[]; updatedAt: number }>;
+    docs: Array<{
+      id: string;
+      roleId: string | null;
+      title: string;
+      tags: string[];
+      sourceType: KbSourceType;
+      origin: string | null;
+      updatedAt: number;
+    }>;
   }> {
     const rows = this.db
       .prepare(
-        `SELECT id, role_id, category, title, tags, updated_at FROM kb_docs
+        `SELECT id, role_id, category, title, tags, source_type, origin, updated_at FROM kb_docs
          ORDER BY category ASC, updated_at DESC`,
       )
       .all() as unknown as Array<Record<string, unknown>>;
     const byCategory = new Map<
       string,
-      Array<{ id: string; roleId: string | null; title: string; tags: string[]; updatedAt: number }>
+      Array<{
+        id: string;
+        roleId: string | null;
+        title: string;
+        tags: string[];
+        sourceType: KbSourceType;
+        origin: string | null;
+        updatedAt: number;
+      }>
     >();
     for (const row of rows) {
       const category = row.category as string;
@@ -1353,6 +1559,8 @@ export class OfficeStore {
         roleId: (row.role_id as string) ?? null,
         title: row.title as string,
         tags: JSON.parse((row.tags as string) ?? "[]"),
+        sourceType: ((row.source_type as string) ?? "manual") as KbSourceType,
+        origin: (row.origin as string) ?? null,
         updatedAt: row.updated_at as number,
       });
       byCategory.set(category, list);
@@ -1402,6 +1610,8 @@ function kbFromRow(row: Record<string, unknown>): KbDoc {
     content: row.content as string,
     tags: JSON.parse((row.tags as string) ?? "[]"),
     author: (row.author as string) ?? null,
+    sourceType: ((row.source_type as string) ?? "manual") as KbSourceType,
+    origin: (row.origin as string) ?? null,
     createdAt: row.created_at as number,
     updatedAt: row.updated_at as number,
   };

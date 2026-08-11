@@ -1,15 +1,18 @@
 import {
+  DEFAULT_DEPARTMENT_NAME,
   HALL_CHANNEL,
   parseMentions,
   SUPERVISOR_NAME,
   type AgentCard,
   type BriefInput,
   type KbDoc,
+  type KbSourceType,
   type OfficeGroup,
   type OfficeRole,
   type RoleDossier,
   type TaskHandoff,
   type TaskStatus,
+  type TaskTimeline,
 } from "@agent-office/protocol";
 import { existsSync } from "node:fs";
 import { basename, join } from "node:path";
@@ -83,7 +86,9 @@ export class OfficeService {
     if (!store.getAgentByName(SUPERVISOR_NAME)) {
       store.registerAgent({ name: SUPERVISOR_NAME, kind: "supervisor", status: "online" });
     }
+    store.ensureDefaultDepartment();
     store.assignRolesToUnassignedAgents();
+    store.syncAllAgentsToRoleDepartments();
   }
 
   /** 附图 URL（/files/xxx）→ 本地绝对路径；只认 uploads 目录下真实存在的文件 */
@@ -589,64 +594,84 @@ export class OfficeService {
     return this.store.listAgents().find((item) => item.id === agent!.id)!;
   }
 
-  // ---------- 项目组 ----------
+  // ---------- 部门（原项目组，职位归属单元） ----------
 
   createGroup(name: string): { ok: boolean; error?: string; group?: OfficeGroup } {
     const group = this.store.createGroup(name);
-    if (!group) return { ok: false, error: "组名为空或已存在" };
-    this.event({ type: "group", text: `新建项目组「${group.name}」` });
+    if (!group) return { ok: false, error: "部门名为空或已存在" };
+    this.event({ type: "group", text: `新建部门「${group.name}」` });
     this.emit("group", { groupId: group.id });
     return { ok: true, group };
   }
 
   deleteGroup(groupId: string): { ok: boolean; error?: string } {
     const group = this.store.getGroupById(groupId);
-    if (!group) return { ok: false, error: "项目组不存在" };
+    if (!group) return { ok: false, error: "部门不存在" };
+    if (group.name === DEFAULT_DEPARTMENT_NAME) {
+      return { ok: false, error: "默认部门「综合部」不可解散" };
+    }
     this.store.deleteGroup(groupId);
-    this.event({ type: "group", text: `项目组「${group.name}」已解散，成员回到大群` });
+    this.store.syncAllAgentsToRoleDepartments();
+    this.event({
+      type: "group",
+      text: `部门「${group.name}」已解散，其下职位回落「${DEFAULT_DEPARTMENT_NAME}」`,
+    });
     this.emit("group", { groupId });
+    this.emit("role", {});
+    this.emit("agent", {});
     return { ok: true };
   }
 
-  /** 整体覆盖员工的组归属；支持同时在多个组，传空数组表示退出所有组 */
-  assignGroups(agentId: string, groupIds: string[]): { ok: boolean; error?: string } {
+  /** 兼容旧接口：部门归属由职位决定，手动改组已废弃，改为跟随当前职位重同步 */
+  assignGroups(agentId: string, _groupIds: string[]): { ok: boolean; error?: string } {
     const agent = this.store.getAgentById(agentId);
     if (!agent) return { ok: false, error: "成员不存在" };
     if (agent.kind === "user" || agent.kind === "supervisor") {
-      return { ok: false, error: "boss 与主管不归属任何项目组（全频道可见）" };
+      return { ok: false, error: "boss 与主管不归属任何部门（全频道可见）" };
     }
-    if (!this.store.setAgentGroups(agentId, groupIds)) {
-      return { ok: false, error: "存在无效的项目组" };
-    }
-    const names = this.store
-      .agentGroupIds(agentId)
-      .map((gid) => this.store.getGroupById(gid)?.name)
-      .filter(Boolean);
-    this.event({
-      type: "group",
-      agentId,
-      text:
-        names.length > 0
-          ? `「${agent.name}」的项目组调整为：${names.join("、")}`
-          : `「${agent.name}」退出所有项目组，回到大群`,
-    });
+    this.store.syncAgentToRoleDepartment(agentId);
     this.emit("agent", { agentId });
     return { ok: true };
   }
 
   // ---------- 职位（岗位上下文交接） ----------
 
-  createRole(name: string, description?: string): { ok: boolean; error?: string; role?: OfficeRole } {
+  createRole(
+    name: string,
+    description?: string,
+    groupId?: string | null,
+  ): { ok: boolean; error?: string; role?: OfficeRole } {
     if (!name.trim()) return { ok: false, error: "职位名不能为空" };
-    const role = this.store.createRole(name, description);
-    if (!role) return { ok: false, error: "职位已存在" };
+    const role = this.store.createRole(name, description, groupId);
+    if (!role) {
+      return {
+        ok: false,
+        error: groupId && !this.store.getGroupById(groupId) ? "部门不存在" : "职位已存在",
+      };
+    }
     const assigned = this.store.assignRolesToUnassignedAgents();
+    this.store.syncAllAgentsToRoleDepartments();
     this.event({
       type: "role",
-      text: `新建职位「${role.name}」${assigned > 0 ? `，自动安排 ${assigned} 位未任职员工` : ""}`,
+      text: `新建职位「${role.name}」归属「${role.groupName ?? DEFAULT_DEPARTMENT_NAME}」${assigned > 0 ? `，自动安排 ${assigned} 位未任职员工` : ""}`,
     });
     this.emit("role", { roleId: role.id });
+    this.emit("agent", {});
     return { ok: true, role };
+  }
+
+  setRoleDepartment(roleId: string, groupId: string): { ok: boolean; error?: string } {
+    if (!this.store.setRoleDepartment(roleId, groupId)) {
+      return { ok: false, error: "职位或部门不存在" };
+    }
+    const role = this.store.getRoleById(roleId);
+    this.event({
+      type: "role",
+      text: `职位「${role?.name}」调整到部门「${role?.groupName}」`,
+    });
+    this.emit("role", { roleId });
+    this.emit("agent", {});
+    return { ok: true };
   }
 
   deleteRole(roleId: string): { ok: boolean; error?: string } {
@@ -1204,6 +1229,8 @@ export class OfficeService {
     content: string;
     tags?: string[];
     author?: string | null;
+    sourceType?: KbSourceType;
+    origin?: string | null;
   }): { doc: KbDoc; created: boolean } | null {
     if (input.id) {
       const doc = this.store.updateKbDoc(input.id, {
@@ -1223,14 +1250,158 @@ export class OfficeService {
     }
     const author = input.author ? this.store.getAgentByName(input.author) : null;
     const roleId = author ? ((author.meta as { roleId?: string }).roleId ?? null) : null;
-    const doc = this.store.createKbDoc({ ...input, roleId });
+    const sourceType = input.sourceType ?? (input.author ? "ai" : "manual");
+    const doc = this.store.createKbDoc({
+      ...input,
+      roleId,
+      sourceType,
+      origin: input.origin ?? null,
+    });
     this.emit("kb", { id: doc.id });
     this.event({
       type: "kb",
       agentId: input.author ? (this.store.getAgentByName(input.author)?.id ?? null) : null,
-      text: `知识库新增「${doc.category} / ${truncate(doc.title, 50)}」`,
+      text: `知识库新增「${doc.category} / ${truncate(doc.title, 50)}」[${doc.sourceType}]`,
     });
     return { doc, created: true };
+  }
+
+  /** 文档收录：粘贴 / URL / 文件（含 PDF 文本提取） */
+  async kbImport(input: {
+    mode: "paste" | "url" | "file";
+    category?: string;
+    title?: string;
+    content?: string;
+    url?: string;
+    filename?: string;
+    mime?: string;
+    data?: string;
+    tags?: string[];
+    author?: string | null;
+  }): Promise<{ ok: true; doc: KbDoc } | { ok: false; error: string }> {
+    const category = (input.category?.trim() || "收录").slice(0, 60);
+    const tags = input.tags ?? [];
+    const author = input.author ?? this.bossName();
+
+    if (input.mode === "paste") {
+      const content = input.content?.trim();
+      if (!content) return { ok: false, error: "正文不能为空" };
+      const title = (input.title?.trim() || content.slice(0, 40).replace(/\s+/g, " ")).slice(0, 200);
+      const result = this.kbWrite({
+        category,
+        title,
+        content,
+        tags,
+        author,
+        sourceType: "manual",
+        origin: null,
+      });
+      return result ? { ok: true, doc: result.doc } : { ok: false, error: "写入失败" };
+    }
+
+    if (input.mode === "url") {
+      const url = input.url?.trim();
+      if (!url) return { ok: false, error: "URL 不能为空" };
+      let parsed: URL;
+      try {
+        parsed = new URL(url);
+      } catch {
+        return { ok: false, error: "URL 无效" };
+      }
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return { ok: false, error: "仅支持 http/https" };
+      }
+      try {
+        const res = await fetch(url, {
+          headers: { "user-agent": "AgentsOffice-kb-import/1.0" },
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (!res.ok) return { ok: false, error: `抓取失败 HTTP ${res.status}` };
+        const html = await res.text();
+        const text = stripHtmlToText(html);
+        if (!text.trim()) return { ok: false, error: "网页未解析出正文" };
+        const titleFromHtml = html.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1]?.trim();
+        const title = (
+          input.title?.trim() ||
+          titleFromHtml ||
+          parsed.hostname
+        ).slice(0, 200);
+        const result = this.kbWrite({
+          category,
+          title,
+          content: text.slice(0, 200_000),
+          tags,
+          author,
+          sourceType: "url",
+          origin: url,
+        });
+        return result ? { ok: true, doc: result.doc } : { ok: false, error: "写入失败" };
+      } catch (e) {
+        return { ok: false, error: `抓取失败：${(e as Error).message}` };
+      }
+    }
+
+    // file
+    const filename = input.filename?.trim() || "upload.txt";
+    const data = input.data;
+    if (!data) return { ok: false, error: "缺少文件数据" };
+    let buffer: Buffer;
+    try {
+      buffer = Buffer.from(data, "base64");
+    } catch {
+      return { ok: false, error: "base64 解码失败" };
+    }
+    if (buffer.length > 20 * 1024 * 1024) return { ok: false, error: "文件不能超过 20MB" };
+
+    const lower = filename.toLowerCase();
+    const mime = (input.mime ?? "").toLowerCase();
+    const isPdf = lower.endsWith(".pdf") || mime === "application/pdf";
+    const isText =
+      lower.endsWith(".md") ||
+      lower.endsWith(".txt") ||
+      lower.endsWith(".markdown") ||
+      mime.startsWith("text/") ||
+      mime === "application/json";
+
+    let content: string;
+    let sourceType: KbSourceType;
+    if (isPdf) {
+      try {
+        const { extractText, getDocumentProxy } = await import("unpdf");
+        const pdf = await getDocumentProxy(new Uint8Array(buffer));
+        const { text } = await extractText(pdf, { mergePages: true });
+        content = (typeof text === "string" ? text : String(text ?? "")).trim();
+        sourceType = "pdf";
+      } catch (e) {
+        return { ok: false, error: `PDF 解析失败：${(e as Error).message}` };
+      }
+      if (!content) return { ok: false, error: "PDF 未提取到文本" };
+    } else if (isText) {
+      content = buffer.toString("utf8");
+      sourceType = "upload";
+    } else {
+      return { ok: false, error: "仅支持 md/txt/markdown/pdf" };
+    }
+
+    const title = (
+      input.title?.trim() ||
+      filename.replace(/\.[^.]+$/, "") ||
+      "未命名文档"
+    ).slice(0, 200);
+    const result = this.kbWrite({
+      category,
+      title,
+      content: content.slice(0, 500_000),
+      tags,
+      author,
+      sourceType,
+      origin: filename,
+    });
+    return result ? { ok: true, doc: result.doc } : { ok: false, error: "写入失败" };
+  }
+
+  getTaskTimeline(taskId: string): TaskTimeline | null {
+    return this.store.getTaskTimeline(taskId);
   }
 
   kbDelete(id: string): boolean {
@@ -1244,26 +1415,69 @@ export class OfficeService {
 
   // ---------- 上下文 ----------
 
-  /** 办公室全景上下文：花名册、任务、简报、知识库目录（对所有 Agent 开放） */
+  /** 办公室全景上下文：花名册（按部门）、待认领/进行中任务、简报、知识库目录 */
   getContext(limitBriefs = 10) {
+    const tasks = this.store.listTasks();
+    const claimableTasks = tasks.filter((t) => t.status === "open" && !t.assigneeAgentId);
+    const openTasks = tasks.filter((t) => t.status !== "done" && t.status !== "cancelled");
+    const roles = this.store.listRoles();
+    const groups = this.store.listGroups();
+    const agents = this.store.listAgents();
+    const departments = groups.map((g) => ({
+      id: g.id,
+      name: g.name,
+      roles: roles
+        .filter((r) => r.groupId === g.id)
+        .map((r) => ({
+          id: r.id,
+          name: r.name,
+          holders: r.holderNames ?? [],
+        })),
+      members: agents
+        .filter((a) => a.groupIds?.includes(g.id))
+        .map((a) => ({
+          name: a.name,
+          kind: a.kind,
+          status: a.status,
+          title: (a.meta as { title?: string }).title ?? null,
+        })),
+    }));
     return {
       bossName: this.bossName(),
-      groups: this.store.listGroups(),
-      roles: this.store.listRoles(),
-      roster: this.store.listAgents().map((a) => ({
+      departments,
+      groups,
+      roles,
+      roster: agents.map((a) => ({
         name: a.name,
         kind: a.kind,
         status: a.status,
         workspace: a.workspace,
         model: (a.meta as { model?: string }).model ?? null,
         title: (a.meta as { title?: string }).title ?? null,
+        department: a.groupNames?.[0] ?? null,
         groups: a.groupNames ?? [],
       })),
-      openTasks: this.store.listTasks().filter((t) => t.status !== "done" && t.status !== "cancelled"),
+      claimableTasks,
+      openTasks,
       briefs: this.store.listBriefs(limitBriefs),
       kbCatalog: this.store.kbCatalog(),
+      hint: "空闲时可用 claim_task 从 claimableTasks（任务板待认领）领取任务。",
     };
   }
+}
+
+function stripHtmlToText(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function formatHandoffMessage(handoff: TaskHandoff, targetName: string): string {

@@ -46,10 +46,13 @@ export interface AgentCard {
   groupNames?: string[];
 }
 
-/** 频道标识：大群固定为 "hall"，项目组频道即组 ID */
+/** 频道标识：大群固定为 "hall"，部门频道即组 ID */
 export const HALL_CHANNEL = "hall";
 
-/** 项目组：一组员工 + 一个专属频道 */
+/** 默认部门名：无归属职位落入此部门 */
+export const DEFAULT_DEPARTMENT_NAME = "综合部";
+
+/** 部门（沿用 groups 表）：职位归属单元 + 专属频道 */
 export interface OfficeGroup {
   id: string;
   name: string;
@@ -60,16 +63,24 @@ export interface OfficeGroup {
 /**
  * 职位：绑定「岗位上下文」的第一公民。谁坐这个职位谁继承全部档案——
  * 职位笔记（账号/路径/决策等硬信息）、历任简报、发给历任在岗者的定向消息。
+ * 每个职位隶属一个部门（groupId），在岗员工自动进入该部门频道。
  */
 export interface OfficeRole {
   id: string;
   name: string;
   description: string | null;
+  /** 所属部门 ID */
+  groupId: string | null;
+  /** 所属部门名 */
+  groupName?: string | null;
   createdAt: number;
   /** 当前在岗成员名（可多人同岗） */
   holderNames?: string[];
   noteCount?: number;
 }
+
+/** 知识库文档来源 */
+export type KbSourceType = "manual" | "upload" | "url" | "pdf" | "ai";
 
 /** 职位档案笔记：跟职位走、不跟人走的持久信息 */
 export interface RoleNote {
@@ -159,6 +170,17 @@ export interface OfficeBrief {
   blockers: string | null;
   nextSteps: string | null;
   createdAt: number;
+}
+
+/** 任务时间线条目：按时间聚合该任务上的消息、简报、交接 */
+export type TaskTimelineItem =
+  | { kind: "message"; at: number; message: OfficeMessage }
+  | { kind: "brief"; at: number; brief: OfficeBrief }
+  | { kind: "handoff"; at: number; handoff: TaskHandoff };
+
+export interface TaskTimeline {
+  task: OfficeTask;
+  items: TaskTimelineItem[];
 }
 
 export interface OfficeEvent {
@@ -266,6 +288,10 @@ export interface KbDoc {
   content: string;
   tags: string[];
   author: string | null;
+  /** 来源类型 */
+  sourceType: KbSourceType;
+  /** 原文件名或 URL；手写/AI 可为空 */
+  origin: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -369,7 +395,7 @@ export function buildManagedPrompt(opts: {
   }
   lines.push(
     "",
-    "如果本机 MCP 里有 agent-office / agent_office 服务，你还可以：get_context 获取花名册、任务与最近简报；kb_list / kb_read 查公共知识库（疑难杂症与解决方案）；遇到值得沉淀的问题用 kb_write 记录。",
+    "如果本机 MCP 里有 agent-office / agent_office 服务，你还可以：get_context 获取花名册、待认领任务与最近简报；空闲时用 claim_task 从任务板领取 open 任务；kb_list / kb_read 查公共知识库（疑难杂症与解决方案）；遇到值得沉淀的问题用 kb_write 记录。",
     "请完成消息中的请求。回答的最后用一段话总结你的结果，这段总结会作为简报共享给办公室全员。",
   );
   return lines.join("\n");

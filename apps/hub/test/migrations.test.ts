@@ -21,12 +21,15 @@ describe("版本化数据库迁移", () => {
     db.exec(SCHEMA);
     const count = applyMigrations(db);
     expect(count).toBe(MIGRATIONS.length);
-    expect(appliedVersions(db)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(appliedVersions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     expect(columns(db, "messages")).toEqual(
       expect.arrayContaining(["from_name", "channel", "images"]),
     );
     expect(columns(db, "briefs")).toContain("role_id");
-    expect(columns(db, "kb_docs")).toContain("role_id");
+    expect(columns(db, "kb_docs")).toEqual(
+      expect.arrayContaining(["role_id", "source_type", "origin"]),
+    );
+    expect(columns(db, "roles")).toContain("group_id");
     expect(columns(db, "task_handoffs")).toEqual(
       expect.arrayContaining(["from_agent_id", "to_agent_id", "status", "idempotency_key"]),
     );
@@ -47,12 +50,18 @@ describe("版本化数据库迁移", () => {
       "CREATE TABLE group_members(group_id TEXT NOT NULL, agent_id TEXT NOT NULL, PRIMARY KEY(group_id, agent_id));",
     );
     db.exec(`CREATE TABLE briefs(
-      id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, kind TEXT NOT NULL, source TEXT NOT NULL,
+      id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, task_id TEXT, kind TEXT NOT NULL, source TEXT NOT NULL,
       title TEXT NOT NULL, result TEXT NOT NULL, created_at INTEGER NOT NULL
     );`);
     db.exec(`CREATE TABLE kb_docs(
       id TEXT PRIMARY KEY, category TEXT NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL,
       tags TEXT NOT NULL DEFAULT '[]', author TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );`);
+    db.exec(`CREATE TABLE groups(
+      id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE, created_at INTEGER NOT NULL
+    );`);
+    db.exec(`CREATE TABLE roles(
+      id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE, description TEXT, created_at INTEGER NOT NULL
     );`);
     db.exec(
       "INSERT INTO agents(id, name, kind, status) VALUES ('a1', '老员工', 'codex-cli', 'online');",
@@ -60,11 +69,14 @@ describe("版本化数据库迁移", () => {
 
     const count = applyMigrations(db);
     expect(count).toBe(MIGRATIONS.length);
-    expect(appliedVersions(db)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(appliedVersions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     // 缺失列补上
     expect(columns(db, "messages")).toContain("images");
     expect(columns(db, "briefs")).toContain("role_id");
-    expect(columns(db, "kb_docs")).toContain("role_id");
+    expect(columns(db, "kb_docs")).toEqual(
+      expect.arrayContaining(["role_id", "source_type", "origin"]),
+    );
+    expect(columns(db, "roles")).toContain("group_id");
     expect(columns(db, "task_handoffs")).toContain("status");
     // 已有列未被重复添加
     expect(columns(db, "messages").filter((c) => c === "from_name")).toHaveLength(1);
@@ -101,7 +113,7 @@ describe("版本化数据库迁移", () => {
     db.exec(SCHEMA);
     expect(applyMigrations(db)).toBe(MIGRATIONS.length);
     expect(applyMigrations(db)).toBe(0);
-    expect(appliedVersions(db)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(appliedVersions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     db.close();
   });
 
@@ -120,10 +132,10 @@ describe("版本化数据库迁移", () => {
       },
     ];
     expect(() => applyMigrations(db, failing)).toThrow(/v999（故意失败）失败：boom/);
-    expect(appliedVersions(db)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(appliedVersions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     // 失败迁移不入库，再次尝试仍抛错、不污染已成功迁移
     expect(() => applyMigrations(db, failing)).toThrow(/v999/);
-    expect(appliedVersions(db)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(appliedVersions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     db.close();
   });
 });
