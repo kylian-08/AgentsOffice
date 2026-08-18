@@ -20,9 +20,13 @@ async function main(): Promise<void> {
   console.log(`[agent-office] MCP 端点：http://127.0.0.1:${config.port}/mcp`);
   console.log(`[agent-office] 数据目录：${config.dataDir}`);
 
-  // 手工会话闲置 30 分钟自动标记离席
+  // 手工会话闲置 30 分钟自动标记离席；超期离线（默认 72 小时）自动归档
   office.sweepIdleSessions();
-  const sweeper = setInterval(() => office.sweepIdleSessions(), 60_000);
+  office.archiveStaleAgents(72 * 60 * 60_000);
+  const sweeper = setInterval(() => {
+    office.sweepIdleSessions();
+    office.archiveStaleAgents(72 * 60 * 60_000);
+  }, 60_000);
 
   // 重启不丢活：把上次进程退出时没来得及执行的积压未读重新派发
   const recovered = office.recoverPendingDispatches();

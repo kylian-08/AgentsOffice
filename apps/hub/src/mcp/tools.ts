@@ -227,6 +227,9 @@ export function createMcpServer(office: OfficeService): McpServer {
     async (args) => {
       const doc = office.store.getKbDoc(args.id);
       if (!doc) return text({ ok: false, error: "文档不存在" });
+      if (doc.status !== "active") {
+        return text({ ok: false, error: "文档当前不可读（待审/退役）" });
+      }
       return text({ ok: true, doc });
     },
   );
@@ -262,7 +265,7 @@ export function createMcpServer(office: OfficeService): McpServer {
     {
       title: "写入知识库",
       description:
-        "把疑难杂症及解决方案沉淀到知识库。新文档会自动关联作者当前职位，供同岗成员共享；无职位作者写入全办公室公共知识。",
+        "把疑难杂症及解决方案沉淀到知识库。新文档会自动关联作者当前职位，供同岗成员共享；无职位作者写入全办公室公共知识。AI 写入的文档默认进入待审（pending），由人工批准后才对检索可见。",
       inputSchema: {
         agent: z.string().describe("你的工号（作为文档作者）"),
         id: z.string().optional().describe("要更新的文档 ID，新增时不填"),
@@ -274,9 +277,12 @@ export function createMcpServer(office: OfficeService): McpServer {
         title: z.string().min(1).max(200).describe("文档标题，一句话概括问题"),
         content: z.string().min(1).describe("正文：问题现象、根因、解决步骤、验证方式"),
         tags: z.array(z.string()).optional().describe("标签，便于检索"),
+        task_id: z.string().optional().describe("关联任务 ID（可选），会记录到文档出处作为证据链"),
       },
     },
     async (args) => {
+      // 证据链：记录关联任务 ID，知识卡可跳回任务时间线查出处
+      const origin = args.task_id ? `task:${args.task_id}` : null;
       const result = office.kbWrite({
         id: args.id,
         category: args.category,
@@ -284,6 +290,7 @@ export function createMcpServer(office: OfficeService): McpServer {
         content: args.content,
         tags: args.tags,
         author: args.agent,
+        origin,
       });
       if (!result) return text({ ok: false, error: "要更新的文档不存在" });
       return text({
@@ -291,6 +298,8 @@ export function createMcpServer(office: OfficeService): McpServer {
         created: result.created,
         id: result.doc.id,
         roleId: result.doc.roleId,
+        status: result.doc.status,
+        note: result.doc.status === "pending" ? "文档已进入待审队列，人工批准后对全员可见" : undefined,
       });
     },
   );
@@ -342,23 +351,25 @@ export function createMcpServer(office: OfficeService): McpServer {
     "update_task",
     {
       title: "更新任务状态",
-      description: "更新任务状态（in_progress / done / cancelled 等），可附一句说明。",
+      description:
+        "更新任务状态。合法流转：open → claimed → in_progress → review → done（done 只能由验收方确认）；打回 review → in_progress；任意活跃态可 cancelled / blocked。执行者最多推进到 review。",
       inputSchema: {
         agent: z.string().describe("你的工号"),
         task_id: z.string().describe("任务 ID"),
-        status: z.enum(["open", "claimed", "in_progress", "done", "cancelled"]),
+        status: z.enum(["open", "claimed", "in_progress", "review", "blocked", "done", "cancelled"]),
         note: z.string().optional().describe("一句话说明"),
       },
     },
     async (args) => {
-      const task = office.updateTask({
+      const result = office.updateTask({
         taskId: args.task_id,
         status: args.status,
         byAgentName: args.agent,
         note: args.note,
       });
-      if (!task) return text({ ok: false, error: "任务不存在" });
-      return text({ ok: true, task });
+      if (!result) return text({ ok: false, error: "任务不存在" });
+      if ("error" in result) return text({ ok: false, error: result.error });
+      return text({ ok: true, task: result });
     },
   );
 

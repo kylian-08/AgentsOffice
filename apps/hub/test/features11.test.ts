@@ -109,6 +109,7 @@ describe("职位与岗位档案交接", () => {
       title: "迁移操作手册",
       content: "先冻结写入，再镜像仓库并校验 commit 数量",
       author: "codex-1",
+      sourceType: "manual",
     })!.doc;
     expect(knowledge.roleId).toBe(role.id);
 
@@ -163,6 +164,7 @@ describe("职位与岗位档案交接", () => {
       title: "GPU 网关排障",
       content: "先检查 6000 端口，再检查任务队列",
       author: "claude-2",
+      sourceType: "manual",
     });
 
     office.sendMessage({ fromName: "老板", text: "@claude-2 继续分析架构" });
@@ -222,6 +224,7 @@ describe("职位与岗位档案交接", () => {
       title: "仍需保留的知识",
       content: "职位撤销后转为公共知识",
       author: "codex-x",
+      sourceType: "manual",
     })!.doc;
 
     expect(office.deleteRole(role.id).ok).toBe(true);

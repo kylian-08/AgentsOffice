@@ -21,9 +21,19 @@ export type AgentKind =
   | "supervisor"
   | "user";
 
-export type AgentStatus = "online" | "busy" | "offline";
+export type AgentStatus = "online" | "busy" | "offline" | "archived";
 
-export type TaskStatus = "open" | "claimed" | "in_progress" | "done" | "cancelled";
+export type TaskStatus =
+  | "open"
+  | "claimed"
+  | "in_progress"
+  | "review"
+  | "blocked"
+  | "done"
+  | "cancelled";
+
+/** 知识库文档生命周期：待审 → 生效 → 退役 */
+export type KbStatus = "pending" | "active" | "retired";
 
 export type TaskHandoffStatus = "queued" | "dispatched" | "running" | "accepted" | "failed";
 
@@ -126,6 +136,8 @@ export interface OfficeTask {
   assigneeAgentId: string | null;
   assigneeName: string | null;
   createdBy: string | null;
+  /** 验收标准（创建时可填）；验收方据此核对实际产出 */
+  acceptanceCriteria: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -290,8 +302,10 @@ export interface KbDoc {
   author: string | null;
   /** 来源类型 */
   sourceType: KbSourceType;
-  /** 原文件名或 URL；手写/AI 可为空 */
+  /** 原文件名或 URL；手写/AI 可为空；AI 写入时可记录 task:xxx 证据链 */
   origin: string | null;
+  /** 生命周期：pending（AI 待审）/ active（生效）/ retired（退役） */
+  status: KbStatus;
   createdAt: number;
   updatedAt: number;
 }
@@ -352,11 +366,18 @@ export function buildManagedPrompt(opts: {
   imagePaths?: string[];
   /** 职位交接档案：在岗者自动继承的岗位上下文 */
   roleDossier?: RoleDossier;
+  /** 关联任务的验收标准：引导按标准核查产出，完成后推进到 review 等待验收 */
+  acceptanceCriteria?: string | null;
 }): string {
   const lines = [
     `[Agent Office] 你是协作办公室的成员「${opts.agentName}」。`,
     "如果你只完成了任务的一个阶段并需要同事接手，必须调用 handoff_task 保存交接材料并唤醒接班员工；不要只在最终回复里写 @工号。",
   ];
+  if (opts.acceptanceCriteria?.trim()) {
+    lines.push(
+      `本任务设有验收标准：${opts.acceptanceCriteria.trim()}。请对照标准逐一核查实际产出（读文件 / 跑命令验证），不要只凭自己的结论自报完成；全部满足后再把任务推进到 review（update_task 填 review）等待验收方确认，验收通过前不要宣称任务完成。`,
+    );
+  }
   if (opts.roleDossier) {
     const d = opts.roleDossier;
     lines.push(

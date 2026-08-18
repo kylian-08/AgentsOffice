@@ -39,12 +39,15 @@ const STATUS_LABELS: Record<string, string> = {
   online: "在席",
   busy: "忙碌",
   offline: "离席",
+  archived: "已离职",
 };
 
 const TASK_STATUS_LABELS: Record<string, string> = {
   open: "待认领",
   claimed: "已认领",
   in_progress: "进行中",
+  review: "待验收",
+  blocked: "已阻塞",
   done: "已完成",
   cancelled: "已取消",
 };
@@ -1723,7 +1726,7 @@ function TaskPanel({
 }) {
   const claimable = tasks.filter((t) => t.status === "open" && !t.assigneeAgentId);
   const active = tasks.filter(
-    (t) => t.status === "claimed" || t.status === "in_progress",
+    (t) => t.status === "claimed" || t.status === "in_progress" || t.status === "review",
   );
   return (
     <section className="panel panel-tasks">
@@ -1784,6 +1787,8 @@ function TasksBoard({
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [assignee, setAssignee] = useState("");
+  const [acceptanceCriteria, setAcceptanceCriteria] = useState("");
+  const [reviewNote, setReviewNote] = useState("");
   const [error, setError] = useState("");
   const assignable = sortWorkersForAction(
     agents.filter((a) => a.kind !== "user" && a.kind !== "supervisor"),
@@ -1810,15 +1815,22 @@ function TasksBoard({
 
   const claimable = tasks.filter((t) => t.status === "open");
   const active = tasks.filter((t) => t.status === "claimed" || t.status === "in_progress");
+  const reviewing = tasks.filter((t) => t.status === "review" || t.status === "blocked");
   const closed = tasks.filter((t) => t.status === "done" || t.status === "cancelled");
 
   const create = async () => {
     if (!title.trim()) return;
     try {
-      const task = await api.createTask(title.trim(), description.trim(), assignee || null);
+      const task = await api.createTask(
+        title.trim(),
+        description.trim(),
+        assignee || null,
+        acceptanceCriteria.trim() || undefined,
+      );
       setTitle("");
       setDescription("");
       setAssignee("");
+      setAcceptanceCriteria("");
       setCreating(false);
       setError("");
       onChanged();
@@ -1831,6 +1843,18 @@ function TasksBoard({
   const update = async (taskId: string, patch: { status?: string; assignee?: string | null }) => {
     try {
       await api.updateTask(taskId, patch);
+      setError("");
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const review = async (action: "accept" | "reject") => {
+    if (!selectedId) return;
+    try {
+      await api.reviewTask(selectedId, action, reviewNote.trim() || undefined);
+      setReviewNote("");
       setError("");
       onChanged();
     } catch (e) {
@@ -1915,6 +1939,11 @@ function TasksBoard({
               rows={2}
               onChange={(e) => setDescription(e.target.value)}
             />
+            <input
+              placeholder="验收标准（可选，验收方据此核对产出）"
+              value={acceptanceCriteria}
+              onChange={(e) => setAcceptanceCriteria(e.target.value)}
+            />
             <select value={assignee} onChange={(e) => setAssignee(e.target.value)}>
               <option value="">进待认领池</option>
               {assignable.map((a) => (
@@ -1939,6 +1968,7 @@ function TasksBoard({
         <div className="tasks-board">
           {renderColumn("待认领", claimable)}
           {renderColumn("进行中", active)}
+          {renderColumn("待验收", reviewing)}
           {renderColumn("已完成", closed)}
         </div>
         <aside className="tasks-detail">
@@ -1952,6 +1982,27 @@ function TasksBoard({
               </p>
               {timeline.task.description && (
                 <p className="tasks-detail-desc">{timeline.task.description}</p>
+              )}
+              {timeline.task.acceptanceCriteria && (
+                <p className="tasks-detail-criteria">
+                  <strong>验收标准：</strong>
+                  {timeline.task.acceptanceCriteria}
+                </p>
+              )}
+              {timeline.task.status === "review" && (
+                <div className="tasks-review">
+                  <input
+                    placeholder="打回意见（验收通过可留空）"
+                    value={reviewNote}
+                    onChange={(e) => setReviewNote(e.target.value)}
+                  />
+                  <button className="primary-btn sm" onClick={() => void review("accept")}>
+                    验收通过
+                  </button>
+                  <button className="ghost-btn" onClick={() => void review("reject")}>
+                    打回
+                  </button>
+                </div>
               )}
               <ol className="task-timeline">
                 {timeline.items.length === 0 && (
@@ -2769,7 +2820,14 @@ type KbCatalog = Array<{
   }>;
 }>;
 
-function KbBoard({ refreshKey }: { refreshKey: number }) {
+function KbBoard({
+  refreshKey,
+  onOpenTask,
+}: {
+  refreshKey: number;
+  /** 证据链跳转：点击「task:xxx」来源跳到对应任务时间线 */
+  onOpenTask?: (taskId: string) => void;
+}) {
   const [catalog, setCatalog] = useState<KbCatalog>([]);
   const [selectedId, setSelectedId] = useState("");
   const [doc, setDoc] = useState<KbDoc | null>(null);
@@ -2783,12 +2841,18 @@ function KbBoard({ refreshKey }: { refreshKey: number }) {
   const [importUrl, setImportUrl] = useState("");
   const [error, setError] = useState("");
   const [sourceFilter, setSourceFilter] = useState("");
+  const [pendingDocs, setPendingDocs] = useState<KbDoc[]>([]);
 
   const loadCatalog = useCallback(() => {
     api.kbCatalog().then(({ catalog: c }) => setCatalog(c)).catch((e) => setError(e.message));
   }, []);
 
+  const loadPending = useCallback(() => {
+    api.kbPending().then(({ docs }) => setPendingDocs(docs)).catch(() => setPendingDocs([]));
+  }, []);
+
   useEffect(loadCatalog, [loadCatalog, refreshKey]);
+  useEffect(loadPending, [loadPending, refreshKey]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -2847,6 +2911,31 @@ function KbBoard({ refreshKey }: { refreshKey: number }) {
       await api.kbDelete(id);
       if (selectedId === id) setSelectedId("");
       loadCatalog();
+      loadPending();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const approveDoc = async (id: string) => {
+    try {
+      await api.kbSetStatus(id, "active");
+      loadCatalog();
+      loadPending();
+      setError("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const setDocStatus = async (id: string, status: "active" | "retired") => {
+    try {
+      const updated = await api.kbSetStatus(id, status);
+      setSelectedId(updated.id);
+      setDoc(updated);
+      loadCatalog();
+      loadPending();
+      setError("");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -2963,6 +3052,33 @@ function KbBoard({ refreshKey }: { refreshKey: number }) {
             文件/PDF
           </button>
         </div>
+        {pendingDocs.length > 0 && (
+          <div className="kb-pending">
+            <h4>
+              <span className="tag p1">待审</span> {pendingDocs.length} 篇 AI 沉淀等待批准
+            </h4>
+            <ul>
+              {pendingDocs.map((doc) => (
+                <li key={doc.id}>
+                  <button type="button" className="task-link" onClick={() => setSelectedId(doc.id)}>
+                    <span className="task-title">{doc.title}</span>
+                    <span className="task-meta">{doc.category}</span>
+                  </button>
+                  <button className="ghost-btn sm" onClick={() => void approveDoc(doc.id)}>
+                    批准
+                  </button>
+                  <button
+                    className="ghost-btn sm"
+                    title="驳回（删除）"
+                    onClick={() => void remove(doc.id)}
+                  >
+                    驳回
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         <select
           className="kb-source-filter"
           value={sourceFilter}
@@ -3138,13 +3254,45 @@ function KbBoard({ refreshKey }: { refreshKey: number }) {
                 <span className="kb-crumb">{doc.category}</span>
                 <h2>{doc.title}</h2>
                 <p className="kb-meta">
+                  {doc.status === "pending" && <span className="tag p1">待审</span>}
+                  {doc.status === "retired" && <span className="tag">已退役</span>}
                   {doc.sourceType ? `${SOURCE_LABELS_KB[doc.sourceType] ?? doc.sourceType} · ` : ""}
-                  {doc.origin ? `${doc.origin} · ` : ""}
+                  {doc.origin ? (
+                    doc.origin.startsWith("task:") && onOpenTask ? (
+                      <button
+                        type="button"
+                        className="kb-origin-link"
+                        title="跳转到关联任务时间线"
+                        onClick={() => onOpenTask(doc.origin.slice("task:".length))}
+                      >
+                        关联任务 ↗ ·{" "}
+                      </button>
+                    ) : (
+                      `${doc.origin} · `
+                    )
+                  ) : (
+                    ""
+                  )}
                   {doc.author ? `${doc.author} · ` : ""}更新于 {timeAgo(doc.updatedAt)}
                   {doc.tags.length > 0 && <> · {doc.tags.map((t) => <span key={t} className="kb-tag">{t}</span>)}</>}
                 </p>
               </div>
               <div className="kb-article-actions">
+                {doc.status === "pending" && (
+                  <button className="primary-btn sm" onClick={() => void approveDoc(doc.id)}>
+                    批准
+                  </button>
+                )}
+                {doc.status === "active" && (
+                  <button className="ghost-btn sm" onClick={() => void setDocStatus(doc.id, "retired")}>
+                    退役
+                  </button>
+                )}
+                {doc.status === "retired" && (
+                  <button className="ghost-btn sm" onClick={() => void setDocStatus(doc.id, "active")}>
+                    恢复
+                  </button>
+                )}
                 <button
                   className="ghost-btn sm"
                   onClick={() =>
@@ -3258,6 +3406,24 @@ export function App() {
   );
   const toggleDept = (id: string) =>
     setCollapsedDepts((prev) => ({ ...prev, [id]: !prev[id] }));
+
+  const archiveAll = async () => {
+    if (
+      !window.confirm(
+        "确定一键归档全部超期离线员工吗？历史消息、简报与档案都会完整保留，同名工号重新注册会自动复活。",
+      )
+    ) {
+      return;
+    }
+    try {
+      const { archived } = await api.archiveAllStale();
+      setSyncError("");
+      refresh();
+      if (archived > 0) setAgentQuery(""); // 归档后刷新名单
+    } catch (e) {
+      setSyncError(e instanceof Error ? e.message : String(e));
+    }
+  };
 
   if (!state) {
     return (
@@ -3514,7 +3680,13 @@ export function App() {
         </main>
       ) : view === "kb" ? (
         <main className="kb-page">
-          <KbBoard refreshKey={state.events.length} />
+          <KbBoard
+            refreshKey={state.events.length}
+            onOpenTask={(taskId) => {
+              setFocusTaskId(taskId);
+              setView("tasks");
+            }}
+          />
         </main>
       ) : (
         <main className="layout">
@@ -3542,6 +3714,13 @@ export function App() {
                     {showArchivedAgents ? "只看当前" : `历史 ${rosterSelection.archivedCount}`}
                   </button>
                 )}
+                <button
+                  className="ghost-btn sm"
+                  title="把超期离线（默认 72 小时）且名下无未完成任务的手工会话归档为已离职"
+                  onClick={() => void archiveAll()}
+                >
+                  一键归档
+                </button>
               </div>
               <div className="badges">
                 {rosterSelection.visible.length === 0 && (

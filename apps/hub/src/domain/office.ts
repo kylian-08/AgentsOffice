@@ -4,11 +4,14 @@ import {
   parseMentions,
   SUPERVISOR_NAME,
   type AgentCard,
+  type AgentKind,
   type BriefInput,
   type KbDoc,
   type KbSourceType,
+  type KbStatus,
   type OfficeGroup,
   type OfficeRole,
+  type OfficeTask,
   type RoleDossier,
   type TaskHandoff,
   type TaskStatus,
@@ -149,7 +152,8 @@ export class OfficeService {
       this.store.registerAgent({ name: input.fromName, kind: "user" });
     const channel =
       input.channel && this.store.getGroupById(input.channel) ? input.channel : HALL_CHANNEL;
-    const roster = this.store.listAgents();
+    // 已归档员工不参与 @ 提及与 @all 广播
+    const roster = this.store.listAgents().filter((a) => a.status !== "archived");
     const rosterNames = roster.map((a) => a.name);
     const { targets, all } = parseMentions(input.text, rosterNames);
 
@@ -292,6 +296,7 @@ export class OfficeService {
     description?: string | null;
     createdBy?: string | null;
     assigneeName?: string | null;
+    acceptanceCriteria?: string | null;
   }) {
     const assignee = input.assigneeName
       ? this.store.getAgentByName(input.assigneeName)
@@ -301,6 +306,7 @@ export class OfficeService {
       description: input.description,
       createdBy: input.createdBy,
       assigneeAgentId: assignee?.id ?? null,
+      acceptanceCriteria: input.acceptanceCriteria ?? null,
     });
     this.emit("task", task);
     this.event({ type: "task", text: `新任务：${truncate(input.title, 60)}` });
@@ -338,10 +344,17 @@ export class OfficeService {
         ? (this.store.getAgentByName(input.assigneeName)?.id ?? null)
         : null;
     }
-    const updated = this.store.updateTask(input.taskId, {
-      status: input.status,
-      assigneeAgentId,
-    });
+    let updated: OfficeTask | null;
+    try {
+      updated = this.store.updateTask(input.taskId, {
+        status: input.status,
+        assigneeAgentId,
+      });
+    } catch (error) {
+      // 非法状态迁移：明确错误回给调用方（MCP / REST），不落时间线
+      return { error: error instanceof Error ? error.message : String(error) } as const;
+    }
+    if (!updated) return null;
     this.emit("task", updated);
     const by = input.byAgentName ? this.store.getAgentByName(input.byAgentName) : null;
     this.event({
@@ -350,6 +363,31 @@ export class OfficeService {
       text: `任务「${truncate(task.title, 40)}」→ ${input.status ?? task.status}${input.note ? `：${truncate(input.note, 80)}` : ""}`,
     });
     return updated;
+  }
+
+  /**
+   * 交接落定后推进任务到 review：接任者完成的是阶段产出，验收仍由主管/用户执行。
+   * 非法迁移（如任务已 done）静默忽略。
+   */
+  advanceTaskToReview(taskId: string | null | undefined, byName?: string): void {
+    if (!taskId) return;
+    const task = this.store.getTask(taskId);
+    if (!task) return;
+    if (task.status === "in_progress" || task.status === "claimed") {
+      try {
+        this.store.updateTask(taskId, { status: "review" });
+      } catch {
+        return;
+      }
+      const updated = this.store.getTask(taskId)!;
+      this.emit("task", updated);
+      const by = byName ? this.store.getAgentByName(byName) : null;
+      this.event({
+        type: "task",
+        agentId: by?.id ?? null,
+        text: `任务「${truncate(task.title, 40)}」→ review（交接落定，等待验收）`,
+      });
+    }
   }
 
   /**
@@ -1133,12 +1171,25 @@ export class OfficeService {
    * 闲置清扫：手工会话（Cursor/Codex/Claude）超过 idleMs 没有任何动静就标记离席，
    * 避免早已关闭的会话一直显示"在席"，让人误以为 @它 会有响应。
    */
+  /** 全部手工会话 kind：闲置清扫与归档只针对它们 */
+  private static readonly SESSION_KINDS = new Set<AgentKind>([
+    "cursor-ide",
+    "codex-cli",
+    "claude-cli",
+    "zcode-cli",
+    "workbuddy-cli",
+    "opencode-cli",
+    "kimi-cli",
+    "qoder-cli",
+    "kilo-cli",
+    "trae-ide",
+  ]);
+
   sweepIdleSessions(idleMs = 30 * 60_000): number {
     const cutoff = Date.now() - idleMs;
-    const sessionKinds = new Set(["cursor-ide", "codex-cli", "claude-cli"]);
     let swept = 0;
     for (const agent of this.store.listAgents()) {
-      if (!sessionKinds.has(agent.kind)) continue;
+      if (!OfficeService.SESSION_KINDS.has(agent.kind)) continue;
       if (agent.status === "offline") continue;
       if ((agent.lastSeenAt ?? 0) >= cutoff) continue;
       this.store.setAgentStatusQuiet(agent.id, "offline");
@@ -1146,6 +1197,45 @@ export class OfficeService {
       swept += 1;
     }
     return swept;
+  }
+
+  /**
+   * 归档超期离线的手工会话（僵尸员工清理）。
+   * 软归档：不删任何数据——消息、简报、任务时间线、知识署名、对话历史全部保留，
+   * 仅从名册默认视图 / get_context / @补全 / 派发候选 / 部门在册人数中剔除。
+   * 名下仍有未完成任务（非 done/cancelled）的员工不归档。
+   */
+  archiveStaleAgents(idleMs: number, config?: { enabled?: boolean }): number {
+    if (config?.enabled === false) return 0;
+    const cutoff = Date.now() - idleMs;
+    const unfinished = new Set(
+      this.store
+        .listTasks()
+        .filter((t) => t.status !== "done" && t.status !== "cancelled")
+        .map((t) => t.assigneeAgentId)
+        .filter((id): id is string => Boolean(id)),
+    );
+    let archived = 0;
+    for (const agent of this.store.listAgents()) {
+      if (!OfficeService.SESSION_KINDS.has(agent.kind)) continue;
+      if (agent.status !== "offline") continue;
+      if ((agent.lastSeenAt ?? 0) >= cutoff) continue;
+      if (unfinished.has(agent.id)) continue;
+      this.store.setAgentStatusQuiet(agent.id, "archived");
+      this.emit("agent", { agentId: agent.id });
+      this.event({
+        type: "archive",
+        agentId: agent.id,
+        text: `「${agent.name}」已离线超期，自动归档（历史消息与档案完整保留；同名重注册自动复活）`,
+      });
+      archived += 1;
+    }
+    return archived;
+  }
+
+  /** 手动批量归档全部超期离线员工（返回归档数）；供网页「一键归档」与主管调用 */
+  archiveAllStale(idleMs = 72 * 60 * 60_000): number {
+    return this.archiveStaleAgents(idleMs);
   }
 
   /** 记录实时活动（不落 events 表，避免刷屏；经 SSE 推送） */
@@ -1181,7 +1271,13 @@ export class OfficeService {
     } else {
       const candidates = this.store
         .listAgents()
-        .filter((a) => a.kind !== "user" && a.kind !== "supervisor" && a.status !== "offline");
+        .filter(
+          (a) =>
+            a.kind !== "user" &&
+            a.kind !== "supervisor" &&
+            a.status !== "offline" &&
+            a.status !== "archived",
+        );
       const managedIdle = candidates.filter(
         (a) => MANAGED_KINDS.has(a.kind) && a.status === "online",
       );
@@ -1231,6 +1327,7 @@ export class OfficeService {
     author?: string | null;
     sourceType?: KbSourceType;
     origin?: string | null;
+    status?: KbStatus;
   }): { doc: KbDoc; created: boolean } | null {
     if (input.id) {
       const doc = this.store.updateKbDoc(input.id, {
@@ -1251,19 +1348,41 @@ export class OfficeService {
     const author = input.author ? this.store.getAgentByName(input.author) : null;
     const roleId = author ? ((author.meta as { roleId?: string }).roleId ?? null) : null;
     const sourceType = input.sourceType ?? (input.author ? "ai" : "manual");
+    // 知识策展：AI 自产知识默认进 pending 待审，人工导入默认 active
+    const status =
+      input.status ?? (sourceType === "ai" ? "pending" : "active");
     const doc = this.store.createKbDoc({
       ...input,
       roleId,
       sourceType,
+      status,
       origin: input.origin ?? null,
     });
     this.emit("kb", { id: doc.id });
     this.event({
       type: "kb",
       agentId: input.author ? (this.store.getAgentByName(input.author)?.id ?? null) : null,
-      text: `知识库新增「${doc.category} / ${truncate(doc.title, 50)}」[${doc.sourceType}]`,
+      text: `知识库新增「${doc.category} / ${truncate(doc.title, 50)}」[${doc.sourceType}]${status === "pending" ? "（待审）" : ""}`,
     });
     return { doc, created: true };
+  }
+
+  /** 知识生命周期切换（待审 → 生效 / 退役 ↔ 生效），写日志与事件 */
+  kbSetStatus(id: string, status: KbStatus, byName?: string): KbDoc | null {
+    const doc = this.store.setKbDocStatus(id, status);
+    if (!doc) return null;
+    this.emit("kb", { id });
+    this.logs.append({
+      source: "kb",
+      agentName: byName ?? null,
+      text: `知识文档「${doc.category} / ${doc.title}」→ ${status}`,
+    });
+    return doc;
+  }
+
+  /** 待审队列（知识库后台管理用） */
+  kbPending(): KbDoc[] {
+    return this.store.listKbDocsByStatus("pending");
   }
 
   /** 文档收录：粘贴 / URL / 文件（含 PDF 文本提取） */
@@ -1422,7 +1541,8 @@ export class OfficeService {
     const openTasks = tasks.filter((t) => t.status !== "done" && t.status !== "cancelled");
     const roles = this.store.listRoles();
     const groups = this.store.listGroups();
-    const agents = this.store.listAgents();
+    // 已归档（archived）员工不进入全景上下文：名册、部门成员、派发候选一律剔除
+    const activeAgents = this.store.listAgents().filter((a) => a.status !== "archived");
     const departments = groups.map((g) => ({
       id: g.id,
       name: g.name,
@@ -1433,7 +1553,7 @@ export class OfficeService {
           name: r.name,
           holders: r.holderNames ?? [],
         })),
-      members: agents
+      members: activeAgents
         .filter((a) => a.groupIds?.includes(g.id))
         .map((a) => ({
           name: a.name,
@@ -1447,7 +1567,7 @@ export class OfficeService {
       departments,
       groups,
       roles,
-      roster: agents.map((a) => ({
+      roster: activeAgents.map((a) => ({
         name: a.name,
         kind: a.kind,
         status: a.status,

@@ -95,6 +95,9 @@ describe("完成任务数", () => {
     const office = makeOffice();
     const agent = office.store.registerAgent({ name: "a1", kind: "codex-cli" });
     const task = office.createTask({ title: "修 bug", assigneeName: "a1" });
+    // 状态机：claimed → in_progress → review → done（done 必须经验收）
+    office.updateTask({ taskId: task.id, status: "in_progress" });
+    office.updateTask({ taskId: task.id, status: "review" });
     office.updateTask({ taskId: task.id, status: "done" });
     const card = office.store.listAgents().find((a) => a.id === agent.id)!;
     expect(card.doneTasks).toBe(1);

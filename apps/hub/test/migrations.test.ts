@@ -21,7 +21,7 @@ describe("版本化数据库迁移", () => {
     db.exec(SCHEMA);
     const count = applyMigrations(db);
     expect(count).toBe(MIGRATIONS.length);
-    expect(appliedVersions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(appliedVersions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     expect(columns(db, "messages")).toEqual(
       expect.arrayContaining(["from_name", "channel", "images"]),
     );
@@ -33,6 +33,8 @@ describe("版本化数据库迁移", () => {
     expect(columns(db, "task_handoffs")).toEqual(
       expect.arrayContaining(["from_agent_id", "to_agent_id", "status", "idempotency_key"]),
     );
+    expect(columns(db, "tasks")).toContain("acceptance_criteria");
+    expect(columns(db, "kb_docs")).toContain("status");
     db.close();
   });
 
@@ -63,13 +65,17 @@ describe("版本化数据库迁移", () => {
     db.exec(`CREATE TABLE roles(
       id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE, description TEXT, created_at INTEGER NOT NULL
     );`);
+    db.exec(`CREATE TABLE tasks(
+      id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT, status TEXT NOT NULL DEFAULT 'open',
+      assignee_agent_id TEXT, created_by TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );`);
     db.exec(
       "INSERT INTO agents(id, name, kind, status) VALUES ('a1', '老员工', 'codex-cli', 'online');",
     );
 
     const count = applyMigrations(db);
     expect(count).toBe(MIGRATIONS.length);
-    expect(appliedVersions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(appliedVersions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     // 缺失列补上
     expect(columns(db, "messages")).toContain("images");
     expect(columns(db, "briefs")).toContain("role_id");
@@ -78,6 +84,8 @@ describe("版本化数据库迁移", () => {
     );
     expect(columns(db, "roles")).toContain("group_id");
     expect(columns(db, "task_handoffs")).toContain("status");
+    expect(columns(db, "tasks")).toContain("acceptance_criteria");
+    expect(columns(db, "kb_docs")).toContain("status");
     // 已有列未被重复添加
     expect(columns(db, "messages").filter((c) => c === "from_name")).toHaveLength(1);
     expect(columns(db, "messages").filter((c) => c === "channel")).toHaveLength(1);
@@ -113,7 +121,7 @@ describe("版本化数据库迁移", () => {
     db.exec(SCHEMA);
     expect(applyMigrations(db)).toBe(MIGRATIONS.length);
     expect(applyMigrations(db)).toBe(0);
-    expect(appliedVersions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(appliedVersions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     db.close();
   });
 
@@ -132,10 +140,10 @@ describe("版本化数据库迁移", () => {
       },
     ];
     expect(() => applyMigrations(db, failing)).toThrow(/v999（故意失败）失败：boom/);
-    expect(appliedVersions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(appliedVersions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     // 失败迁移不入库，再次尝试仍抛错、不污染已成功迁移
     expect(() => applyMigrations(db, failing)).toThrow(/v999/);
-    expect(appliedVersions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(appliedVersions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     db.close();
   });
 });

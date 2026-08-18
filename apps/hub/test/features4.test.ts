@@ -62,6 +62,8 @@ describe("公共知识库", () => {
       content: "【问题现象】push GitHub 报 Connection was reset\n【解决步骤】走本地 7890 代理",
       tags: ["git", "proxy"],
       author: "codex-a",
+      // 显式人工来源 → 直接生效可见（AI 来源默认进待审，另测）
+      sourceType: "manual",
     });
     expect(created?.created).toBe(true);
 
@@ -70,6 +72,7 @@ describe("公共知识库", () => {
       title: "pnpm 忽略构建脚本",
       content: "allowBuilds 配置 esbuild",
       author: "老板",
+      sourceType: "manual",
     });
 
     const catalog = office.store.kbCatalog();
@@ -104,6 +107,7 @@ describe("公共知识库", () => {
       content: "shell:true 只杀 cmd 壳，需要 /T /F",
       tags: ["进程"],
       author: "codex-a",
+      sourceType: "manual",
     });
     expect(office.store.searchKbDocs("taskkill")).toHaveLength(1);
     expect(office.store.searchKbDocs("cmd 壳")).toHaveLength(1);

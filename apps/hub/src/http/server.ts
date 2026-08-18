@@ -7,7 +7,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { IntegrationClient } from "@agent-office/protocol";
-import { uuid } from "../util.js";
+import { truncate, uuid } from "../util.js";
 import type { OfficeConfig } from "../config.js";
 import { generateAvatar } from "../domain/avatar.js";
 import type { OfficeService } from "../domain/office.js";
@@ -393,6 +393,7 @@ export async function createServer(
       title?: string;
       description?: string;
       assignee?: string;
+      acceptance_criteria?: string;
     };
     if (!body.title?.trim()) return reply.code(400).send({ error: "title 不能为空" });
     return office.createTask({
@@ -400,20 +401,63 @@ export async function createServer(
       description: body.description ?? null,
       createdBy: office.bossName(),
       assigneeName: body.assignee ?? null,
+      acceptanceCriteria: body.acceptance_criteria?.trim() || null,
     });
   });
 
   app.patch("/api/tasks/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
-    const body = (request.body ?? {}) as { status?: any; assignee?: string | null };
-    const task = office.updateTask({
+    const body = (request.body ?? {}) as {
+      status?: any;
+      assignee?: string | null;
+      acceptance_criteria?: string;
+    };
+    // 验收标准更新（创建后也可补录）
+    if (body.acceptance_criteria !== undefined) {
+      const task = office.store.getTask(id);
+      if (!task) return reply.code(404).send({ error: "任务不存在" });
+      office.store.db
+        .prepare("UPDATE tasks SET acceptance_criteria = ? WHERE id = ?")
+        .run(String(body.acceptance_criteria), id);
+    }
+    const result = office.updateTask({
       taskId: id,
       status: body.status,
       assigneeName: body.assignee,
       byAgentName: office.bossName(),
     });
+    if (!result) return reply.code(404).send({ error: "任务不存在" });
+    if ("error" in result) return reply.code(409).send({ error: result.error });
+    return result;
+  });
+
+  // 任务验收：验收通过（review → done）或打回（review → in_progress，附意见）
+  app.post("/api/tasks/:id/review", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = (request.body ?? {}) as { action?: "accept" | "reject"; note?: string };
+    const task = office.store.getTask(id);
     if (!task) return reply.code(404).send({ error: "任务不存在" });
-    return task;
+    if (task.status !== "review") {
+      return reply.code(409).send({ error: `当前状态为 ${task.status}，只能验收 review 状态的任务` });
+    }
+    const next = body.action === "reject" ? "in_progress" : "done";
+    const result = office.updateTask({
+      taskId: id,
+      status: next,
+      byAgentName: office.bossName(),
+      note: body.note,
+    });
+    if (!result) return reply.code(404).send({ error: "任务不存在" });
+    if ("error" in result) {
+      return reply.code(409).send({ error: result.error });
+    }
+    office.event({
+      type: "task",
+      text: body.action === "reject"
+        ? `任务「${truncate(task.title, 40)}」打回：${body.note ?? "未附意见"}`
+        : `任务「${truncate(task.title, 40)}」验收通过`,
+    });
+    return result;
   });
 
   app.get("/api/tasks/:id/timeline", async (request, reply) => {
@@ -508,6 +552,15 @@ export async function createServer(
     const result = office.deleteAgent(id);
     if (!result.ok) return reply.code(400).send({ error: result.error });
     return { ok: true };
+  });
+
+  // 一键归档：全部超期离线（默认 72 小时）且名下无未完成任务的员工转 archived
+  app.post("/api/agents/archive-all", async (request, reply) => {
+    const body = (request.body ?? {}) as { idle_ms?: number };
+    const archived = office.archiveAllStale(
+      Number.isFinite(body.idle_ms) && Number(body.idle_ms!) > 0 ? Number(body.idle_ms) : undefined,
+    );
+    return { ok: true, archived };
   });
 
   app.post("/api/agents/:id/promote", async (request, reply) => {
@@ -606,6 +659,22 @@ export async function createServer(
 
   // ---------- 公共知识库 ----------
   app.get("/api/kb/catalog", async () => ({ catalog: office.store.kbCatalog() }));
+
+  // 待审队列（知识策展后台）
+  app.get("/api/kb/pending", async () => ({ docs: office.kbPending() }));
+
+  // 知识生命周期切换：pending → active（批准） / active ↔ retired（退役/恢复）
+  app.post("/api/kb/docs/:id/status", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = (request.body ?? {}) as { status?: string };
+    const status = body.status;
+    if (status !== "pending" && status !== "active" && status !== "retired") {
+      return reply.code(400).send({ error: "status 必须是 pending / active / retired" });
+    }
+    const doc = office.kbSetStatus(id, status, office.bossName());
+    if (!doc) return reply.code(404).send({ error: "文档不存在" });
+    return doc;
+  });
 
   app.get("/api/kb/docs", async (request) => {
     const query = request.query as { category?: string; q?: string };

@@ -187,6 +187,22 @@ export const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 11,
+    name: "tasks.acceptance_criteria 任务验收标准",
+    detect: (db) => hasColumn(db, "tasks", "acceptance_criteria"),
+    up: (db) => {
+      db.exec("ALTER TABLE tasks ADD COLUMN acceptance_criteria TEXT");
+    },
+  },
+  {
+    version: 12,
+    name: "kb_docs.status 知识生命周期（待审/生效/退役）",
+    detect: (db) => hasColumn(db, "kb_docs", "status"),
+    up: (db) => {
+      db.exec("ALTER TABLE kb_docs ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
+    },
+  },
 ];
 
 function recordApplied(db: DatabaseSync, migration: Migration): void {

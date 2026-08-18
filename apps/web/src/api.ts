@@ -137,18 +137,40 @@ export const api = {
     fetch(`/api/channels/${channel}/messages${includeEvents ? "?events=1" : ""}`, {
       method: "DELETE",
     }).then((r) => json<{ ok: boolean; cleared: number; clearedEvents?: number }>(r)),
-  createTask: (title: string, description: string, assignee: string | null) =>
+  createTask: (
+    title: string,
+    description: string,
+    assignee: string | null,
+    acceptanceCriteria?: string,
+  ) =>
     fetch("/api/tasks", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ title, description, assignee }),
+      body: JSON.stringify({ title, description, assignee, acceptance_criteria: acceptanceCriteria }),
     }).then((r) => json<OfficeTask>(r)),
-  updateTask: (id: string, patch: { status?: string; assignee?: string | null }) =>
+  updateTask: (
+    id: string,
+    patch: { status?: string; assignee?: string | null; acceptance_criteria?: string },
+  ) =>
     fetch(`/api/tasks/${id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(patch),
     }).then((r) => json<OfficeTask>(r)),
+  /** 任务验收：accept（通过）/ reject（打回，附意见） */
+  reviewTask: (id: string, action: "accept" | "reject", note?: string) =>
+    fetch(`/api/tasks/${id}/review`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action, note }),
+    }).then((r) => json<OfficeTask>(r)),
+  /** 一键归档全部超期离线员工 */
+  archiveAllStale: (idleMs?: number) =>
+    fetch("/api/agents/archive-all", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ idle_ms: idleMs }),
+    }).then((r) => json<{ ok: boolean; archived: number }>(r)),
   taskTimeline: (id: string) =>
     fetch(`/api/tasks/${id}/timeline`).then((r) =>
       json<{
@@ -265,6 +287,15 @@ export const api = {
   kbSearch: (q: string) =>
     fetch(`/api/kb/docs?q=${encodeURIComponent(q)}`).then((r) => json<{ docs: KbDoc[] }>(r)),
   kbDoc: (id: string) => fetch(`/api/kb/docs/${id}`).then((r) => json<KbDoc>(r)),
+  /** 待审队列（知识策展）：AI 自产知识需人工批准后才对检索可见 */
+  kbPending: () => fetch("/api/kb/pending").then((r) => json<{ docs: KbDoc[] }>(r)),
+  /** 知识生命周期切换：pending → active（批准）/ active ↔ retired */
+  kbSetStatus: (id: string, status: "pending" | "active" | "retired") =>
+    fetch(`/api/kb/docs/${id}/status`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status }),
+    }).then((r) => json<KbDoc>(r)),
   kbCreate: (input: { category: string; title: string; content: string; tags?: string[] }) =>
     fetch("/api/kb/docs", {
       method: "POST",

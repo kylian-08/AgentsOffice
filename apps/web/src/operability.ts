@@ -1,6 +1,6 @@
 import type { AgentCard, OfficeTask } from "@agent-office/protocol";
 
-const ACTIVE_TASKS = new Set(["open", "claimed", "in_progress"]);
+const ACTIVE_TASKS = new Set(["open", "claimed", "in_progress", "review", "blocked"]);
 const DEFAULT_RECENT_MS = 24 * 60 * 60_000;
 
 export interface WorkerSelection {
@@ -36,6 +36,7 @@ function hasActiveTask(agent: AgentCard, tasks: OfficeTask[]): boolean {
 }
 
 function actionRank(agent: AgentCard, tasks: OfficeTask[], now: number): number {
+  if (agent.status === "archived") return 6;
   if (agent.status === "busy") return 0;
   if (agent.status === "online") return 1;
   if ((agent.pendingCount ?? 0) > 0) return 2;
@@ -85,11 +86,11 @@ export function selectWorkers(input: {
   const workers = input.agents.filter(
     (agent) => agent.kind !== "user" && agent.kind !== "supervisor",
   );
-  const archived = workers.filter((agent) => actionRank(agent, input.tasks, now) === 5);
+  const archived = workers.filter((agent) => actionRank(agent, input.tasks, now) >= 5);
   const query = input.query?.trim().toLowerCase() ?? "";
   const candidates = input.showArchived
     ? workers
-    : workers.filter((agent) => actionRank(agent, input.tasks, now) !== 5);
+    : workers.filter((agent) => actionRank(agent, input.tasks, now) < 5);
   return {
     visible: sortWorkersForAction(candidates, input.tasks, now).filter((agent) =>
       matchesWorker(agent, query),

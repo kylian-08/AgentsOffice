@@ -641,6 +641,8 @@ export function createManagedDispatcher(
         office.event({ type: "run", agentId: agent.id, text: "执行完成，已回复并发布简报" });
         if (message.handoffId) {
           store.updateTaskHandoff(message.handoffId, { status: "accepted", error: null });
+          // 交接落定：任务推进到 review 等待验收方确认（接任者完成的是阶段产出）
+          office.advanceTaskToReview(message.taskId, agent.name);
         }
       } catch (error) {
         // 失败也要清收件箱，否则未读数只增不减（直连输入没有投递记录，跳过）

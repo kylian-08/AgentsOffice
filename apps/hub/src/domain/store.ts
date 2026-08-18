@@ -8,6 +8,7 @@ import type {
   BriefInput,
   KbDoc,
   KbSourceType,
+  KbStatus,
   OfficeBrief,
   OfficeEvent,
   OfficeGroup,
@@ -209,6 +210,7 @@ export class OfficeStore {
   }): AgentCard {
     const existing = this.getAgentByName(input.name);
     if (existing) {
+      const wasArchived = existing.status === "archived";
       this.db
         .prepare(
           `UPDATE agents SET status = ?, workspace = COALESCE(?, workspace),
@@ -222,6 +224,15 @@ export class OfficeStore {
           existing.id,
         );
       this.autoAssignAgentRole(existing.id);
+      if (wasArchived) {
+        // 同名工号重新注册：员工自动复活，原部门与职位档案无缝接回
+        this.syncAgentToRoleDepartment(existing.id);
+        this.insertEvent({
+          type: "join",
+          agentId: existing.id,
+          text: "同名工号重新注册，员工自动复活（原部门与职位档案保留）",
+        });
+      }
       return this.getAgentById(existing.id)!;
     }
     const id = uuid();
@@ -1004,18 +1015,42 @@ export class OfficeStore {
 
   // ---------- Tasks ----------
 
+  /**
+   * 任务状态机：合法迁移表。执行者最多推进到 review；done 只能从 review 由验收方确认。
+   * 同状态视为幂等 no-op；其余非法迁移直接拒绝。
+   */
+  private static readonly TASK_TRANSITIONS: Record<TaskStatus, readonly TaskStatus[]> = {
+    open: ["claimed", "in_progress", "cancelled", "blocked"],
+    claimed: ["in_progress", "review", "cancelled", "blocked"],
+    in_progress: ["review", "cancelled", "blocked"],
+    review: ["done", "in_progress", "cancelled", "blocked"],
+    blocked: ["in_progress", "review", "cancelled"],
+    done: [],
+    cancelled: [],
+  };
+
+  static assertTaskTransition(current: TaskStatus, next: TaskStatus): void {
+    if (current === next) return;
+    if (!OfficeStore.TASK_TRANSITIONS[current]?.includes(next)) {
+      throw new Error(
+        `非法任务状态迁移：${current} → ${next}。执行者最多推进到 review，done 必须由验收方确认（任务中心「验收通过」）。`,
+      );
+    }
+  }
+
   createTask(input: {
     title: string;
     description?: string | null;
     createdBy?: string | null;
     assigneeAgentId?: string | null;
+    acceptanceCriteria?: string | null;
   }): OfficeTask {
     const id = uuid();
     const t = now();
     this.db
       .prepare(
-        `INSERT INTO tasks(id, title, description, status, assignee_agent_id, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO tasks(id, title, description, status, assignee_agent_id, created_by, acceptance_criteria, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -1024,6 +1059,7 @@ export class OfficeStore {
         input.assigneeAgentId ? "claimed" : "open",
         input.assigneeAgentId ?? null,
         input.createdBy ?? null,
+        input.acceptanceCriteria ?? null,
         t,
         t,
       );
@@ -1045,6 +1081,7 @@ export class OfficeStore {
           assignee_agent_id: string | null;
           assignee_name: string | null;
           created_by: string | null;
+          acceptance_criteria: string | null;
           created_at: number;
           updated_at: number;
         }
@@ -1058,6 +1095,7 @@ export class OfficeStore {
       assigneeAgentId: row.assignee_agent_id,
       assigneeName: row.assignee_name,
       createdBy: row.created_by,
+      acceptanceCriteria: row.acceptance_criteria ?? null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -1159,6 +1197,7 @@ export class OfficeStore {
   ): OfficeTask | null {
     const task = this.getTask(id);
     if (!task) return null;
+    if (patch.status) OfficeStore.assertTaskTransition(task.status, patch.status);
     this.db
       .prepare(
         "UPDATE tasks SET status = ?, assignee_agent_id = ?, updated_at = ? WHERE id = ?",
@@ -1463,12 +1502,13 @@ export class OfficeStore {
     roleId?: string | null;
     sourceType?: KbSourceType;
     origin?: string | null;
+    status?: KbStatus;
   }): KbDoc {
     const id = uuid();
     this.db
       .prepare(
-        `INSERT INTO kb_docs(id, role_id, category, title, content, tags, author, source_type, origin, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO kb_docs(id, role_id, category, title, content, tags, author, source_type, origin, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -1480,6 +1520,7 @@ export class OfficeStore {
         input.author ?? null,
         input.sourceType ?? "manual",
         input.origin ?? null,
+        input.status ?? "active",
         now(),
         now(),
       );
@@ -1520,7 +1561,7 @@ export class OfficeStore {
     return row ? kbFromRow(row) : null;
   }
 
-  /** 目录索引：分类 → 文档标题清单（不含正文，供快速索引） */
+  /** 目录索引：分类 → 文档标题清单（只含生效文档，供快速索引与 MCP 检索） */
   kbCatalog(): Array<{
     category: string;
     docs: Array<{
@@ -1530,12 +1571,14 @@ export class OfficeStore {
       tags: string[];
       sourceType: KbSourceType;
       origin: string | null;
+      status: KbStatus;
       updatedAt: number;
     }>;
   }> {
     const rows = this.db
       .prepare(
-        `SELECT id, role_id, category, title, tags, source_type, origin, updated_at FROM kb_docs
+        `SELECT id, role_id, category, title, tags, source_type, origin, status, updated_at FROM kb_docs
+         WHERE status = 'active'
          ORDER BY category ASC, updated_at DESC`,
       )
       .all() as unknown as Array<Record<string, unknown>>;
@@ -1548,6 +1591,7 @@ export class OfficeStore {
         tags: string[];
         sourceType: KbSourceType;
         origin: string | null;
+        status: KbStatus;
         updatedAt: number;
       }>
     >();
@@ -1561,6 +1605,7 @@ export class OfficeStore {
         tags: JSON.parse((row.tags as string) ?? "[]"),
         sourceType: ((row.source_type as string) ?? "manual") as KbSourceType,
         origin: (row.origin as string) ?? null,
+        status: ((row.status as string) ?? "active") as KbStatus,
         updatedAt: row.updated_at as number,
       });
       byCategory.set(category, list);
@@ -1568,36 +1613,62 @@ export class OfficeStore {
     return [...byCategory.entries()].map(([category, docs]) => ({ category, docs }));
   }
 
-  /** 关键词检索：标题/正文/标签/分类 LIKE 匹配 */
+  /** 关键词检索：标题/正文/标签/分类 LIKE 匹配（只出生效文档） */
   searchKbDocs(query: string, limit = 20): KbDoc[] {
     const like = `%${query.trim()}%`;
     const rows = this.db
       .prepare(
         `SELECT * FROM kb_docs
-         WHERE title LIKE ? OR content LIKE ? OR tags LIKE ? OR category LIKE ?
+         WHERE status = 'active' AND (title LIKE ? OR content LIKE ? OR tags LIKE ? OR category LIKE ?)
          ORDER BY updated_at DESC LIMIT ?`,
       )
       .all(like, like, like, like, limit) as unknown as Array<Record<string, unknown>>;
     return rows.map(kbFromRow);
   }
 
-  listKbDocs(category?: string, limit = 100): KbDoc[] {
+  listKbDocs(category?: string, limit = 100, status?: KbStatus): KbDoc[] {
     const rows = category
       ? (this.db
-          .prepare("SELECT * FROM kb_docs WHERE category = ? ORDER BY updated_at DESC LIMIT ?")
-          .all(category, limit) as unknown as Array<Record<string, unknown>>)
+          .prepare(
+            `SELECT * FROM kb_docs WHERE category = ? AND status = ?
+             ORDER BY updated_at DESC LIMIT ?`,
+          )
+          .all(category, status ?? "active", limit) as unknown as Array<Record<string, unknown>>)
       : (this.db
-          .prepare("SELECT * FROM kb_docs ORDER BY updated_at DESC LIMIT ?")
-          .all(limit) as unknown as Array<Record<string, unknown>>);
+          .prepare(
+            `SELECT * FROM kb_docs WHERE status = ? ORDER BY updated_at DESC LIMIT ?`,
+          )
+          .all(status ?? "active", limit) as unknown as Array<Record<string, unknown>>);
     return rows.map(kbFromRow);
   }
 
-  /** 某职位成员共同沉淀的知识（新→老）。 */
+  /** 某职位成员共同沉淀的知识（新→老；只出生效文档）。 */
   listRoleKbDocs(roleId: string, limit = 20): KbDoc[] {
     const rows = this.db
-      .prepare("SELECT * FROM kb_docs WHERE role_id = ? ORDER BY updated_at DESC LIMIT ?")
+      .prepare(
+        `SELECT * FROM kb_docs WHERE role_id = ? AND status = 'active'
+         ORDER BY updated_at DESC LIMIT ?`,
+      )
       .all(roleId, limit) as unknown as Array<Record<string, unknown>>;
     return rows.map(kbFromRow);
+  }
+
+  /** 按状态列出全部文档（含待审 / 退役；知识库后台管理用） */
+  listKbDocsByStatus(status: KbStatus, limit = 200): KbDoc[] {
+    const rows = this.db
+      .prepare("SELECT * FROM kb_docs WHERE status = ? ORDER BY updated_at DESC LIMIT ?")
+      .all(status, limit) as unknown as Array<Record<string, unknown>>;
+    return rows.map(kbFromRow);
+  }
+
+  /** 切换知识文档生命周期（pending → active / retired，active ↔ retired 等） */
+  setKbDocStatus(id: string, status: KbStatus): KbDoc | null {
+    const existing = this.getKbDoc(id);
+    if (!existing) return null;
+    this.db
+      .prepare("UPDATE kb_docs SET status = ?, updated_at = ? WHERE id = ?")
+      .run(status, now(), id);
+    return this.getKbDoc(id);
   }
 }
 
@@ -1612,6 +1683,7 @@ function kbFromRow(row: Record<string, unknown>): KbDoc {
     author: (row.author as string) ?? null,
     sourceType: ((row.source_type as string) ?? "manual") as KbSourceType,
     origin: (row.origin as string) ?? null,
+    status: ((row.status as string) ?? "active") as KbStatus,
     createdAt: row.created_at as number,
     updatedAt: row.updated_at as number,
   };
